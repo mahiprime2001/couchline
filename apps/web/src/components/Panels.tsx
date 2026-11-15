@@ -1,12 +1,13 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { REACTIONS, formatTime, parseLink, type Member, type QueueItem } from '@wp/shared';
+import { REACTIONS, canControlPlayback, formatTime, parseLink, type Member, type QueueItem } from '@wp/shared';
 import { requestSeek, send, useRoom } from '../lib/room';
 import { useToast } from '../lib/toast';
 import { checkLink, fetchYt, formatDuration, useGifSearch, looksLikeUrl, playlistIdOf, thumbUrl, useAutoplay, useYtdlp, watchUrl, youtubeIdOf, type YtEntry } from '../lib/ytlists';
 import { ACCENTS, getAccent, getTheme, saveTheme, type Theme } from '../lib/theme';
 
-const isController = (m: Member | null) => m?.role === 'host' || m?.role === 'mod';
+/** Host and organizers: moderation, polls and repeat. Playback and the queue use canControlPlayback instead. */
+const isOrganizer = (m: Member | null) => m?.role === 'host' || m?.role === 'mod';
 const TS = /(\b\d{1,2}:\d{2}(?::\d{2})?\b)/g;
 
 function toSeconds(s: string): number {
@@ -196,7 +197,7 @@ export function ChatPanel() {
               <button type="button" role="menuitem" onClick={() => pick('gif')}>
                 GIF
               </button>
-              {isController(me) && (
+              {isOrganizer(me) && (
                 <button type="button" role="menuitem" onClick={() => pick('poll')}>
                   Poll
                 </button>
@@ -231,7 +232,7 @@ export function PeoplePanel() {
   const members = useRoom((s) => s.members);
   const me = useRoom((s) => s.me);
   const isHost = me?.role === 'host';
-  const ctl = isController(me);
+  const ctl = isOrganizer(me);
 
   const report = (m: Member) => {
     const reason = window.prompt(`Report ${m.nick}. What is the problem?`, '');
@@ -299,7 +300,9 @@ export function QueuePanel() {
   const history = useRoom((s) => s.history);
   const me = useRoom((s) => s.me);
   const sync = useRoom((s) => s.sync);
-  const ctl = isController(me);
+  const memberCount = useRoom((s) => s.members.length);
+  const ctl = canControlPlayback(me?.role, memberCount);
+  const organizer = isOrganizer(me);
   const yt = useYtdlp();
   const autoplay = useAutoplay((s) => s.on);
   const [view, setView] = useState<'playing' | 'suggestions'>('playing');
@@ -457,9 +460,9 @@ export function QueuePanel() {
             )}
             <button
               type="button"
-              disabled={!ctl}
+              disabled={!organizer}
               aria-label={`Repeat: ${repeat}`}
-              title={ctl ? 'When a video ends and nothing is queued: stop, loop the whole list, or replay this video' : 'Only the host and organizers can change repeat'}
+              title={organizer ? 'When a video ends and nothing is queued: stop, loop the whole list, or replay this video' : 'Only the host and organizers can change repeat'}
               onClick={() => send({ t: 'roomSettings', repeat: repeat === 'off' ? 'all' : repeat === 'all' ? 'one' : 'off' })}
             >
               {repeat === 'off' ? '🔁 Repeat: off' : repeat === 'all' ? '🔁 Repeat: all' : '🔂 Repeat: this video'}
@@ -670,7 +673,7 @@ function SuggestedNext({ videoId, ...rows }: Omit<RowsProps, 'entries' | 'nowId'
 function PollStrip({ creating, onDone }: { creating: boolean; onDone(): void }) {
   const poll = useRoom((s) => s.poll);
   const me = useRoom((s) => s.me);
-  const ctl = isController(me);
+  const ctl = isOrganizer(me);
   const [q, setQ] = useState('');
   const [opts, setOpts] = useState('Yes\nNo');
 

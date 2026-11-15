@@ -4,6 +4,7 @@ import { LIMITS, formatTime } from '@wp/shared';
 import { getIceServers, onSignal, send, useRoom } from '../lib/room';
 import { HostStreamer, pickCodecs, type ViewerStat } from '../lib/hostStreamer';
 import { loadHandle, pickVideoFile, reopenHandle, saveHandle } from '../lib/fileHandle';
+import { useHostedFallback } from '../lib/hostedFallback';
 
 const PRESETS: Array<[string, number]> = [
   ['Low · 0.8 Mbps', 800_000],
@@ -13,6 +14,11 @@ const PRESETS: Array<[string, number]> = [
 
 const NO_AUDIO =
   'No sound is being streamed: this file has no audio, or your browser cannot play its audio format (common with AC3, E-AC3 or DTS in movie .mkv/.mp4 files). Viewers get the video only. To keep the sound, convert just the audio: ffmpeg -i input.mkv -c:v copy -c:a aac output.mp4  (or play the file in another player and use "Share a screen / tab" with system audio).';
+
+const CANNOT_PLAY =
+  'Your browser cannot play this file\'s picture or sound. "Convert on the server" works for any format and plays on every device.';
+
+type VideoWithCounts = HTMLVideoElement & { webkitVideoDecodedByteCount?: number; webkitAudioDecodedByteCount?: number };
 
 const NO_AUDIO_SCREEN =
   'No sound is being shared. In the browser\'s share window choose "Entire screen" and tick "Share system audio", or choose a "Chrome tab" and tick "Share tab audio". Sharing a single window never includes sound. Stop streaming and share again to fix it.';
@@ -40,6 +46,9 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
   const streamerRef = useRef<HostStreamer | null>(null);
   const mediaRef = useRef<MediaStream | null>(null);
   const urlRef = useRef('');
+  // the file being played, so a sound problem found later can still offer converting it
+  const fileRef = useRef<File | null>(null);
+  const fallback = useHostedFallback((s) => s.file);
   const posTimer = useRef<number | undefined>(undefined);
 
   const [live, setLive] = useState(false);
@@ -129,11 +138,15 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
     send({ t: 'streamStart', ...info });
     setLive(true);
     setNotice(!hasAudio ? (info.source === 'file' ? NO_AUDIO : NO_AUDIO_SCREEN) : null);
+    if (!hasAudio && info.source === 'file' && fileRef.current) useHostedFallback.getState().offer(fileRef.current, NO_AUDIO);
     if (info.source === 'file' && hasAudio) {
       // a track can exist while the browser decodes nothing from it: check that sound is really playing
       window.setTimeout(() => {
         const v = videoRef.current as (HTMLVideoElement & { webkitAudioDecodedByteCount?: number }) | null;
-        if (v && !v.paused && v.webkitAudioDecodedByteCount === 0) setNotice(NO_AUDIO);
+        if (v && !v.paused && v.webkitAudioDecodedByteCount === 0) {
+          setNotice(NO_AUDIO);
+          if (fileRef.current) useHostedFallback.getState().offer(fileRef.current, NO_AUDIO);
+        }
       }, 3500);
     }
     if (info.source === 'file') {
@@ -147,15 +160,26 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
   const startFile = async (file: File, startAt: number) => {
     const v = videoRef.current!;
     setSource('file');
+    useHostedFallback.getState().clear();
+    fileRef.current = file;
     urlRef.current = URL.createObjectURL(file);
     v.srcObject = null;
     v.src = urlRef.current;
     await new Promise<void>((res, rej) => {
       v.onloadedmetadata = () => res();
-      v.onerror = () => rej(new Error('The browser cannot play that file. Try an .mp4 (H.264) or .webm.'));
+      v.onerror = () => {
+        useHostedFallback.getState().offer(file, CANNOT_PLAY);
+        rej(new Error(CANNOT_PLAY));
+      };
     });
     if (startAt > 0 && startAt < v.duration - 1) v.currentTime = startAt;
     await v.play();
+    // a picture the browser cannot decode still "plays" with no frames (Chrome counts the decoded bytes)
+    await new Promise((r) => window.setTimeout(r, 3000));
+    if ((v as VideoWithCounts).webkitVideoDecodedByteCount === 0) {
+      useHostedFallback.getState().offer(file, CANNOT_PLAY);
+      throw new Error(CANNOT_PLAY);
+    }
     const ms: MediaStream | undefined = (v as any).captureStream?.() ?? (v as any).mozCaptureStream?.();
     if (!ms) throw new Error('This browser cannot capture video from a file. Use Chrome, Edge or Brave.');
     await begin(ms, { fileName: file.name, fileSize: file.size, source: 'file', position: startAt });
@@ -234,6 +258,21 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
     setLive(false);
   };
 
+  // the file this browser could not stream goes to the server instead (HostedUpload converts and hosts it)
+  const convertButton = (
+    <button
+      className="chipbtn"
+      onClick={() => {
+        setError(null);
+        setNotice(null);
+        if (live) stop();
+        useHostedFallback.getState().requestConvert();
+      }}
+    >
+      Convert on the server and host it
+    </button>
+  );
+
   const changeQuality = (bps: number) => {
     setBitrate(bps);
     streamerRef.current?.setBitrate(bps);
@@ -280,6 +319,7 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
             </ul>
           )}
           {notice && <p className="warn small">{notice}</p>}
+          {notice && fallback && convertButton}
           <p className="muted small">Pausing or seeking in your player is what everyone sees. Viewers can rewind, never skip ahead.</p>
         </div>
       ) : (
@@ -331,6 +371,7 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
             <p className="muted small">Screen sharing is not available in this browser (phones and tablets do not support it, and it needs a secure https page).</p>
           )}
           {error && <p className="warn">{error}</p>}
+          {error && fallback && convertButton}
         </div>
       )}
     </div>

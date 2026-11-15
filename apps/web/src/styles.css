@@ -414,6 +414,7 @@ kbd { background: var(--panel-2); border: 1px solid var(--line); border-bottom-w
 .call-tile.live video { opacity: 1; }
 .call-tile.mine video { transform: scaleX(-1); }
 .call-avatar { position: absolute; inset: 0; display: grid; place-items: center; font-size: 30px; font-weight: 700; color: var(--accent-2); background: linear-gradient(135deg, var(--panel-2), var(--panel)); }
+.call-muted { position: absolute; top: 8px; right: 8px; z-index: 1; padding: 2px 7px; border-radius: 999px; background: rgba(0, 0, 0, 0.6); color: var(--danger); font-size: 12px; line-height: 1.4; }
 .call-name { position: absolute; left: 8px; bottom: 8px; max-width: calc(100% - 16px); padding: 2px 9px; border-radius: 999px; background: rgba(0, 0, 0, 0.6); color: #fff; font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* ------------------------------------------------------------------- touch */
@@ -427,6 +428,7 @@ kbd { background: var(--panel-2); border: 1px solid var(--line); border-bottom-w
   .golive { padding: 8px 14px; }
   .tabs button { padding: 12px 8px; }
   .emoji { padding: 8px 12px; }
+  .check input[type='checkbox'] { width: 20px; height: 20px; }
 }
 
 /* -------------------------------------------------------------- responsive */
@@ -451,7 +453,14 @@ kbd { background: var(--panel-2); border: 1px solid var(--line); border-bottom-w
   .source-row { flex-direction: column; }
   .source-row input { font-size: 16px; } /* stops iOS zooming into the field */
   .source-row button { width: 100%; }
-  .source-chips .chipbtn { flex: 1 1 auto; }
+  /* the link options sit in two even columns: buttons and checkboxes share one cell style */
+  .source-chips { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 8px; }
+  .source-chips > .chipbtn { width: 100%; min-height: 40px; }
+  .source-chips > .check { padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel-2); min-height: 40px; }
+  .source-chips > .source-note { grid-column: 1 / -1; }
+  .left { gap: 8px; }
+  /* the chat is the main thing on a phone: give it most of a screen instead of a short strip */
+  .side { min-height: min(70dvh, 620px); }
   .reaction-bar { justify-content: space-between; }
   .chat-form { padding: 8px 10px calc(8px + env(safe-area-inset-bottom)); }
   .chat-form input { font-size: 16px; } /* stops iOS zooming into the field */

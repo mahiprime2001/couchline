@@ -15,16 +15,16 @@ export function CallGrid() {
 
   return (
     <div className="call-grid">
-      {inVoice && <Tile name={`${me?.nick ?? 'You'} (you)`} track={camera} sending={camera !== null} mine />}
+      {inVoice && <Tile name={`${me?.nick ?? 'You'} (you)`} track={camera} sending={camera !== null} mine muted={me?.muted} />}
       {others.map((m) => (
-        <Tile key={m.id} name={m.nick} track={remote[m.id] ?? null} sending={!!remoteCam[m.id]} />
+        <Tile key={m.id} name={m.nick} track={remote[m.id] ?? null} sending={!!remoteCam[m.id]} muted={m.muted} />
       ))}
     </div>
   );
 }
 
 /** One person: their camera when it is switched on and sending frames, otherwise an initial. */
-function Tile({ name, track, sending, mine }: { name: string; track: MediaStreamTrack | null; sending: boolean; mine?: boolean }) {
+function Tile({ name, track, sending, mine, muted }: { name: string; track: MediaStreamTrack | null; sending: boolean; mine?: boolean; muted?: boolean }) {
   const ref = useRef<HTMLVideoElement>(null);
   const [live, setLive] = useState(false);
 
@@ -37,7 +37,9 @@ function Tile({ name, track, sending, mine }: { name: string; track: MediaStream
     v.srcObject = new MediaStream([track]);
     // a remote camera that is off arrives as a muted track; it unmutes when frames start flowing.
     // The events are the fast path; re-reading the flag twice a second catches any change they miss.
-    const sync = () => setLive(!track.muted && track.readyState === 'live');
+    // the camera's on/off state arrives as a message (sending), so the track only needs to be running here;
+    // generator tracks from the room relay do not clear their muted flag the way direct connections did
+    const sync = () => setLive(track.readyState === 'live');
     sync();
     track.addEventListener('mute', sync);
     track.addEventListener('unmute', sync);
@@ -58,6 +60,7 @@ function Tile({ name, track, sending, mine }: { name: string; track: MediaStream
     <div className={`call-tile${on ? ' live' : ''}${mine ? ' mine' : ''}`}>
       <video ref={ref} autoPlay playsInline muted />
       {!on && <span className="call-avatar" aria-hidden>{initial}</span>}
+      {muted && <span className="call-muted" role="img" aria-label="Muted" title="Muted by the host or an organizer">🔇</span>}
       <span className="call-name">{name}</span>
     </div>
   );

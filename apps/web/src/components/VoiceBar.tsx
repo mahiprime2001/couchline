@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { getIceServers, onSignal, send, useRoom } from '../lib/room';
+import { onMedia, send, useRoom } from '../lib/room';
 import { useCall } from '../lib/call';
 import { VoiceManager } from '../lib/voice';
 
@@ -22,13 +22,8 @@ export function VoiceBar() {
   const aliveRef = useRef(true);
   mutedRef.current = muted;
 
-  useEffect(
-    () =>
-      onSignal((from, data) => {
-        if (typeof data?.kind === 'string' && data.kind.startsWith('voice-')) void mgrRef.current?.handleSignal(from, data);
-      }),
-    [],
-  );
+  // encoded voice and camera chunks from the others in voice, relayed by the room server
+  useEffect(() => onMedia((m) => mgrRef.current?.handleMedia(m)), []);
 
   useEffect(() => {
     if (inVoice) mgrRef.current?.reconcile(voiceIds);
@@ -70,11 +65,14 @@ export function VoiceBar() {
     try {
       const mgr = new VoiceManager({
         myId: me.id,
-        iceServers: await getIceServers(),
-        signal: (to, data) => send({ t: 'signal', to, data }),
         container: containerRef.current,
         onRemoteVideo: (id, track) => useCall.getState().setRemote(id, track),
         onRemoteCam: (id, on) => useCall.getState().setRemoteCam(id, on),
+        // the phone can stop the camera by itself: keep the button and our own tile in step with it
+        onCamera: (track) => {
+          setCamOn(track !== null);
+          useCall.getState().setCamera(track);
+        },
       });
       // camera on last time: ask for microphone and camera together, once
       await mgr.join(localStorage.getItem('wp-cam') === '1');
@@ -85,8 +83,10 @@ export function VoiceBar() {
       setInVoice(true);
       useCall.getState().setInVoice(true);
       send({ t: 'voice', on: true });
-    } catch {
-      setError('Microphone unavailable or permission denied.');
+    } catch (e) {
+      // a browser without voice support says so; a refused microphone gets the plain message
+      const err = e as Error;
+      setError(err.name === 'NotAllowedError' || err.name === 'NotFoundError' ? 'Microphone unavailable or permission denied.' : err.message);
     } finally {
       joiningRef.current = false;
     }

@@ -109,6 +109,15 @@ const signalFns = new Set<SignalFn>();
 const reactionFns = new Set<ReactionFn>();
 const seekFns = new Set<SeekFn>();
 
+/** An encoded voice or camera chunk from someone else in voice (see lib/voice.ts). */
+type MediaIn = Extract<ServerMsg, { t: 'media' }>;
+type MediaFn = (msg: MediaIn) => void;
+const mediaFns = new Set<MediaFn>();
+export function onMedia(fn: MediaFn): () => void {
+  mediaFns.add(fn);
+  return () => mediaFns.delete(fn);
+}
+
 export function onSignal(fn: SignalFn): () => void {
   signalFns.add(fn);
   return () => signalFns.delete(fn);
@@ -292,6 +301,12 @@ function handle(msg: ServerMsg): void {
       return;
     case 'signal':
       signalFns.forEach((f) => f(msg.from, msg.data));
+      return;
+    case 'media':
+      mediaFns.forEach((f) => f(msg));
+      return;
+    case 'media':
+      mediaFns.forEach((f) => f(msg));
       return;
     case 'kicked':
       intentional = true;

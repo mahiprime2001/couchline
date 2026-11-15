@@ -209,10 +209,10 @@ export function StreamViewer({ onFullscreen }: Props) {
   useMediaSession({ title: 'Live stream', playing, onPlay: () => !playing && toggle(), onPause: () => playing && toggle(), onSeekBy: seekBy });
 
   let banner: string | null = null;
-  if (!supported) banner = 'This browser cannot play host-streamed video. Use a recent Chrome, Edge or Brave.';
+  if (!supported) banner = 'This browser cannot play host-streamed video. Use a recent Chrome, Edge or Brave, or ask the host to use Convert on the server (it plays on every device).';
   else if (!stream.live) banner = range ? 'Host disconnected. Waiting for them to return… You can still rewind what you have.' : 'Waiting for the host to start streaming…';
   else if (status === 'full') banner = 'This stream is full (the host limits how many people can watch directly).';
-  else if (status === 'error') banner = 'Playback error. Try reloading the page.';
+  else if (status === 'error') banner = 'This browser cannot play the host\'s stream (its picture or sound format). Ask the host to use Convert on the server, which plays on every device.';
   else if (status === 'requesting' || status === 'connecting') banner = range ? 'Reconnecting to the host…' : 'Connecting to the host…';
   else if (status === 'lost') banner = 'Connection to the host lost. Retrying…';
 

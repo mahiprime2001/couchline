@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { clampSeek, computePosition, parseSubtitles, type Cue } from '@wp/shared';
+import { canControlPlayback, clampSeek, computePosition, parseSubtitles, type Cue } from '@wp/shared';
 import { onSeekRequest, send, serverNow, useRoom } from '../lib/room';
 import { htmlApi, loadYT, sharedVideo, ytApi, type PlayerApi } from '../lib/yt';
 import { Controls, SubtitleOverlay, TapControls, useWake } from './Controls';
@@ -21,7 +21,8 @@ export function LinkPlayer(props: Props) {
 function LinkInner({ onFullscreen }: Props) {
   const sync = useRoom((s) => s.sync);
   const me = useRoom((s) => s.me);
-  const canControl = me?.role === 'host' || me?.role === 'mod';
+  const memberCount = useRoom((s) => s.members.length);
+  const canControl = canControlPlayback(me?.role, memberCount);
   const hasPrevious = useRoom((s) => s.history.length > 0);
 
   const holderRef = useRef<HTMLDivElement>(null);

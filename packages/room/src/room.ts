@@ -1,6 +1,7 @@
 import {
   ClientMsg,
   LIMITS,
+  canControlPlayback,
   filterText,
   parseLink,
   type LinkKind,
@@ -19,6 +20,8 @@ import {
 /** The small slice of the WebSocket API the room needs. Cloudflare sockets and Node `ws` both fit. */
 export interface WebSocketLike {
   send(data: string): void;
+  /** bytes waiting to go out on this connection, when the runtime reports it (Node's ws does) */
+  bufferedAmount?: number;
   close(code?: number, reason?: string): void;
   addEventListener(type: 'message', fn: (ev: { data: unknown }) => void): void;
   addEventListener(type: 'close' | 'error', fn: () => void): void;
@@ -219,8 +222,14 @@ export class RoomCore {
     };
   }
 
+  /** Host and organizers: moderation, polls and room settings. */
   private canControl(c: Conn): boolean {
     return c.member.role === 'host' || c.member.role === 'mod';
+  }
+
+  /** Playback and the queue: organizers always, everyone in a small room (see canControlPlayback). */
+  private canPlay(c: Conn): boolean {
+    return canControlPlayback(c.member.role, this.conns.size);
   }
 
   private broadcastMembers(): void {
@@ -383,7 +392,8 @@ export class RoomCore {
 
   private onMessage(c: Conn, msg: ClientMsg): void {
     const isHost = c.member.role === 'host';
-    const control = this.canControl(c);
+    const control = this.canPlay(c);
+    const organiser = this.canControl(c);
 
     switch (msg.t) {
       case 'join':
@@ -433,7 +443,7 @@ export class RoomCore {
       }
 
       case 'control': {
-        // link mode: any host/mod. stream mode: only the host, to tell viewers "host paused / resumed"
+        // link mode: anyone who can play (see canPlay). stream mode: only the host, to tell viewers "host paused / resumed"
         const allowed = this.sync.mode === 'link' ? control : this.sync.mode === 'stream' && isHost;
         if (!allowed || (this.sync.mode === 'stream' && msg.action === 'seek')) return;
         if (msg.action === 'play') this.setSync({ playing: true, position: msg.position });
@@ -559,7 +569,7 @@ export class RoomCore {
       }
 
       case 'kick': {
-        if (!control) return;
+        if (!organiser) return;
         const t = this.conns.get(msg.id);
         if (!t || t === c || t.member.role === 'host') return;
         if (t.member.role === 'mod' && !isHost) return;
@@ -575,7 +585,7 @@ export class RoomCore {
       }
 
       case 'mute': {
-        if (!control) return;
+        if (!organiser) return;
         const t = this.conns.get(msg.id);
         if (!t || t.member.role !== 'viewer') return;
         t.member.muted = msg.muted;
@@ -584,7 +594,7 @@ export class RoomCore {
       }
 
       case 'roomSettings': {
-        if (!control) return;
+        if (!organiser) return;
         if (msg.repeat !== undefined) this.repeat = msg.repeat; // host and mods
         if (isHost) {
           if (msg.locked !== undefined) this.locked = msg.locked;
@@ -645,6 +655,35 @@ export class RoomCore {
         return;
       }
 
+      // ------------------------------------------------------------ voice relay
+      case 'media': {
+        // only people in voice are sent media, and only while they are in voice themselves
+        if (!c.member.voice) return;
+        if (msg.kind === 'keyreq') {
+          // a viewer's decoder lost its place: only the person sending that picture needs to hear it
+          const target = msg.to ? this.conns.get(msg.to) : undefined;
+          if (target && target !== c && target.member.voice) this.send(target, { t: 'media', from: c.member.id, kind: 'keyreq', ts: 0 });
+          return;
+        }
+        for (const x of this.conns.values()) {
+          if (x === c || !x.member.voice) continue;
+          // a receiver whose connection is backed up misses video, not sound; the picture comes back on its next request
+          if (msg.kind === 'video' && (x.ws.bufferedAmount ?? 0) > LIMITS.mediaBacklog) continue;
+          this.send(x, {
+            t: 'media',
+            from: c.member.id,
+            kind: msg.kind,
+            ts: msg.ts,
+            key: msg.key,
+            on: msg.on,
+            rate: msg.rate,
+            ch: msg.ch,
+            data: msg.data,
+          });
+        }
+        return;
+      }
+
       // ------------------------------------------------------------ signalling
       case 'signal': {
         const target = this.conns.get(msg.to);
@@ -668,7 +707,7 @@ export class RoomCore {
 
       // ---------------------------------------------------------------- polls
       case 'pollCreate': {
-        if (!control) return;
+        if (!organiser) return;
         this.poll = { id: crypto.randomUUID(), question: msg.question, options: msg.options, votes: {}, open: true };
         this.broadcast({ t: 'poll', poll: this.poll });
         return;
@@ -682,7 +721,7 @@ export class RoomCore {
       }
 
       case 'pollClose': {
-        if (!control || !this.poll) return;
+        if (!organiser || !this.poll) return;
         this.poll.open = false;
         this.broadcast({ t: 'poll', poll: this.poll });
         return;

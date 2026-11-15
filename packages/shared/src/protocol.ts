@@ -11,7 +11,17 @@ export const LIMITS = {
   queueMax: 200, // room for a whole YouTube playlist
   graceLinkMs: 5 * 60_000,
   graceStreamMs: 20 * 60_000,
+  mediaBacklog: 512_000, // bytes queued for one person before their video is skipped (sound is never skipped)
+  mediaChunk: 300_000, // characters of base64 in one encoded audio or video chunk (a key frame can be ~200 KB)
 } as const;
+
+/** With this many people or fewer in a room, everyone can play, pause, skip and add videos; above it only the host and organizers can. */
+export const OPEN_PLAYBACK_MAX_MEMBERS = 3;
+
+/** Who may control playback and the queue. Moderation (kick, mute, roles, polls, room settings) stays with the host and organizers. */
+export function canControlPlayback(role: string | undefined, memberCount: number): boolean {
+  return role === 'host' || role === 'mod' || memberCount <= OPEN_PLAYBACK_MAX_MEMBERS;
+}
 
 const position = z.number().finite().min(0).max(1_000_000);
 const nick = z.string().trim().min(1).max(24);
@@ -82,6 +92,19 @@ export const ClientMsg = z.discriminatedUnion('t', [
   // webrtc signalling relay (stream + voice)
   z.object({ t: z.literal('signal'), to: z.string().max(64), data: z.unknown() }),
   z.object({ t: z.literal('voice'), on: z.boolean() }),
+  // voice and camera, encoded in the browser and relayed by the server to the other people in voice
+  z.object({
+    t: z.literal('media'),
+    kind: z.enum(['audio', 'video', 'cam', 'keyreq']),
+    ts: z.number().int().min(0).max(1e15),
+    key: z.boolean().optional(),
+    on: z.boolean().optional(),
+    rate: z.number().int().min(8000).max(96000).optional(),
+    ch: z.number().int().min(1).max(2).optional(),
+    data: z.string().max(LIMITS.mediaChunk).optional(),
+    /** 'keyreq' only: who should send a key frame */
+    to: z.string().max(64).optional(),
+  }),
 
   // polls
   z.object({

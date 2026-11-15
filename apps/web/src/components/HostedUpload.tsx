@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { computePosition } from '@wp/shared';
 import { send, serverNow, useRoom } from '../lib/room';
 import { useToast } from '../lib/toast';
+import { useHostedFallback } from '../lib/hostedFallback';
 
 type Job =
   | { phase: 'uploading'; name: string; pct: number }
@@ -204,6 +205,19 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
   }, [auto, music, media, nextUp, sync.kind, code]);
   const unavailable = media !== null && !media.available;
   const pct = (n: number) => `${Math.round(n * 100)}%`;
+
+  // "Convert on the server" from the stream panel: this file could not be streamed, so it is hosted instead.
+  // The counter is remembered, so mounting again does not start the same conversion twice.
+  const convertNonce = useHostedFallback((s) => s.convert);
+  const handledConvert = useRef(0);
+  useEffect(() => {
+    if (convertNonce <= handledConvert.current) return;
+    handledConvert.current = convertNonce;
+    const file = useHostedFallback.getState().file;
+    useHostedFallback.getState().clear();
+    if (file) upload(file);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [convertNonce]);
 
   return (
     <>

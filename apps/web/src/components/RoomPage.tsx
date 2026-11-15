@@ -9,7 +9,7 @@ import { ReactionBar, ReactionLayer } from './Reactions';
 import { VoiceBar } from './VoiceBar';
 import { CallGrid } from './CallGrid';
 import { checkLink, useAutoplaySuggestions, useServerOutdated, useYtdlp } from '../lib/ytlists';
-import { parseLink } from '@wp/shared';
+import { canControlPlayback, parseLink } from '@wp/shared';
 import { useToast } from '../lib/toast';
 import type { ChatMsg } from '@wp/shared';
 
@@ -145,7 +145,8 @@ export function RoomPage({ code, navigate }: { code: string; navigate: (p: strin
   useEffect(() => () => leaveRoom(), []);
 
   useEffect(() => {
-    if (sync.mode === 'stream') setShowStream(false);
+    // a stream or a hosted video is now on the stage: leave the stream panel (it is for starting a stream)
+    if (sync.mode === 'stream' || sync.mode === 'link') setShowStream(false);
   }, [sync.mode]);
 
   // Fullscreen: hide the controls and the mouse cursor after 3 s without movement, bring them back on any activity.
@@ -261,7 +262,7 @@ export function RoomPage({ code, navigate }: { code: string; navigate: (p: strin
 
   // --------------------------------------------------------------- the room
   const isHost = me.role === 'host';
-  const ctl = isHost || me.role === 'mod';
+  const ctl = canControlPlayback(me.role, members.length);
 
   let stage: React.ReactNode;
   if (sync.mode === 'stream') {

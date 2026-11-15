@@ -100,6 +100,17 @@ export type ServerMsg =
   | { t: 'typing'; id: string; nick: string }
   | { t: 'reaction'; id: string; nick: string; emoji: string }
   | { t: 'signal'; from: string; data: unknown }
+  | {
+      t: 'media';
+      from: string;
+      kind: 'audio' | 'video' | 'cam' | 'keyreq';
+      ts: number;
+      key?: boolean;
+      on?: boolean;
+      rate?: number;
+      ch?: number;
+      data?: string;
+    }
   | { t: 'room'; locked: boolean; hasPassword: boolean; repeat: RepeatMode }
   | { t: 'kicked'; reason: string }
   | { t: 'error'; code: string; message: string };
