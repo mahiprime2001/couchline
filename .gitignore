@@ -1,0 +1,10 @@
+node_modules
+dist
+.wrangler
+.dev.vars
+*.log
+tools
+.media
+
+# screenshots left by test runs
+/*.png

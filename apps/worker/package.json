@@ -1,0 +1,20 @@
+{
+  "name": "@wp/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --port 8787",
+    "deploy": "wrangler deploy -c wrangler.deploy.toml",
+    "typecheck": "tsc -p ."
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "^5.20261108.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.158.0"
+  },
+  "dependencies": {
+    "@wp/room": "workspace:*",
+    "@wp/shared": "workspace:*"
+  }
+}

@@ -1,0 +1,28 @@
+{
+  "name": "couchline",
+  "private": true,
+  "packageManager": "pnpm@10.11.1",
+  "scripts": {
+    "dev": "pnpm -r --parallel --filter @wp/web --filter @wp/server dev",
+    "build": "pnpm --filter @wp/web build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm --filter @wp/shared test",
+    "smoke": "node scripts/smoke.mjs",
+    "deploy": "pnpm build && pnpm --filter @wp/worker deploy",
+    "e2e:stream": "node scripts/e2e-stream.mjs",
+    "e2e:link": "node scripts/e2e-link.mjs",
+    "e2e": "pnpm e2e:link && pnpm e2e:stream",
+    "dev:https": "pnpm -r --parallel --filter @wp/web --filter @wp/server dev:https",
+    "dev:cf": "pnpm -r --parallel --filter @wp/web --filter @wp/worker dev",
+    "start": "pnpm build && pnpm --filter @wp/server start",
+    "e2e:mobile": "node scripts/e2e-mobile.mjs",
+    "tunnel": "node scripts/tunnel.mjs",
+    "e2e:hosted": "node scripts/e2e-hosted.mjs",
+    "e2e:player": "node scripts/e2e-player.mjs",
+    "e2e:controls": "node scripts/e2e-controls.mjs",
+    "setup-tools": "node scripts/setup-tools.mjs"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.65.0"
+  }
+}

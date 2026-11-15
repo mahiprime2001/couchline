@@ -1,0 +1,338 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import { useEffect, useRef, useState } from 'react';
+import { LIMITS, formatTime } from '@wp/shared';
+import { getIceServers, onSignal, send, useRoom } from '../lib/room';
+import { HostStreamer, pickCodecs, type ViewerStat } from '../lib/hostStreamer';
+import { loadHandle, pickVideoFile, reopenHandle, saveHandle } from '../lib/fileHandle';
+
+const PRESETS: Array<[string, number]> = [
+  ['Low · 0.8 Mbps', 800_000],
+  ['Medium · 1.5 Mbps', 1_500_000],
+  ['High · 2.5 Mbps', 2_500_000],
+];
+
+const NO_AUDIO =
+  'No sound is being streamed: this file has no audio, or your browser cannot play its audio format (common with AC3, E-AC3 or DTS in movie .mkv/.mp4 files). Viewers get the video only. To keep the sound, convert just the audio: ffmpeg -i input.mkv -c:v copy -c:a aac output.mp4  (or play the file in another player and use "Share a screen / tab" with system audio).';
+
+const NO_AUDIO_SCREEN =
+  'No sound is being shared. In the browser\'s share window choose "Entire screen" and tick "Share system audio", or choose a "Chrome tab" and tick "Share tab audio". Sharing a single window never includes sound. Stop streaming and share again to fix it.';
+
+interface StartInfo {
+  fileName: string;
+  fileSize: number;
+  source: 'file' | 'screen';
+  position: number;
+}
+
+const isChromium = (): boolean => {
+  const brands = (navigator as any).userAgentData?.brands as Array<{ brand: string }> | undefined;
+  return !!brands?.some((b) => /Chrom/i.test(b.brand));
+};
+
+/** `pickSignal` goes up each time the host presses "Choose a video from this device" in the room bar. */
+export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: number; screenSignal?: number }) {
+  const code = useRoom((s) => s.code);
+  const sync = useRoom((s) => s.sync);
+  const stream = useRoom((s) => s.stream);
+  const members = useRoom((s) => s.members);
+
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const streamerRef = useRef<HostStreamer | null>(null);
+  const mediaRef = useRef<MediaStream | null>(null);
+  const urlRef = useRef('');
+  const posTimer = useRef<number | undefined>(undefined);
+
+  const [live, setLive] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [stats, setStats] = useState<ViewerStat[]>([]);
+  const [bitrate, setBitrate] = useState(1_500_000);
+  const [source, setSource] = useState<'file' | 'screen'>('file');
+
+  // getDisplayMedia is missing on phone browsers, and on plain-http pages (not a secure context)
+  const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
+  const codecs = pickCodecs();
+  const supported = codecs !== null && typeof RTCPeerConnection !== 'undefined';
+  const resumable = sync.mode === 'stream' && !stream.live && !live;
+
+  useEffect(
+    () =>
+      onSignal((from, data) => {
+        if (typeof data?.kind === 'string' && data.kind.startsWith('stream-')) {
+          void streamerRef.current?.handleSignal(from, data);
+        }
+      }),
+    [],
+  );
+
+  const cleanup = () => {
+    window.clearInterval(posTimer.current);
+    streamerRef.current?.stop();
+    streamerRef.current = null;
+    mediaRef.current?.getTracks().forEach((t) => t.stop());
+    mediaRef.current = null;
+    if (urlRef.current) URL.revokeObjectURL(urlRef.current);
+    urlRef.current = '';
+    const v = videoRef.current;
+    if (v) {
+      v.pause();
+      v.removeAttribute('src');
+      v.srcObject = null;
+    }
+    setStats([]);
+  };
+
+  // leaving the page (or the room switching to a link) ends the stream
+  useEffect(() => cleanup, []);
+
+  // Tell viewers when the host pauses or resumes, so they rest on the last frame instead of
+  // sitting on a frozen picture that looks like it is still trying to play.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!live || source !== 'file' || !v) return;
+    const onPause = () => {
+      send({ t: 'control', action: 'pause', position: v.currentTime });
+      streamerRef.current?.setPaused(true);
+    };
+    const onPlay = () => {
+      streamerRef.current?.setPaused(false);
+      send({ t: 'control', action: 'play', position: v.currentTime });
+    };
+    v.addEventListener('pause', onPause);
+    v.addEventListener('play', onPlay);
+    return () => {
+      v.removeEventListener('pause', onPause);
+      v.removeEventListener('play', onPlay);
+    };
+  }, [live, source]);
+
+  const begin = async (ms: MediaStream, info: StartInfo) => {
+    // declare only the tracks that really exist (see pickCodecs)
+    const hasAudio = ms.getAudioTracks().length > 0;
+    const streamCodecs = pickCodecs(hasAudio);
+    if (!streamCodecs) throw new Error('This browser cannot encode WebM streams.');
+    mediaRef.current = ms;
+    const iceServers = await getIceServers();
+    const streamer = new HostStreamer({
+      stream: ms,
+      codecs: streamCodecs,
+      bitrate,
+      iceServers,
+      maxViewers: LIMITS.maxViewersStream,
+      signal: (to, data) => send({ t: 'signal', to, data }),
+      onStats: setStats,
+      onBitrate: setBitrate,
+    });
+    streamerRef.current = streamer;
+    streamer.start();
+    send({ t: 'streamStart', ...info });
+    setLive(true);
+    setNotice(!hasAudio ? (info.source === 'file' ? NO_AUDIO : NO_AUDIO_SCREEN) : null);
+    if (info.source === 'file' && hasAudio) {
+      // a track can exist while the browser decodes nothing from it: check that sound is really playing
+      window.setTimeout(() => {
+        const v = videoRef.current as (HTMLVideoElement & { webkitAudioDecodedByteCount?: number }) | null;
+        if (v && !v.paused && v.webkitAudioDecodedByteCount === 0) setNotice(NO_AUDIO);
+      }, 3500);
+    }
+    if (info.source === 'file') {
+      posTimer.current = window.setInterval(() => {
+        const v = videoRef.current;
+        if (v) send({ t: 'streamPosition', position: v.currentTime });
+      }, 5000);
+    }
+  };
+
+  const startFile = async (file: File, startAt: number) => {
+    const v = videoRef.current!;
+    setSource('file');
+    urlRef.current = URL.createObjectURL(file);
+    v.srcObject = null;
+    v.src = urlRef.current;
+    await new Promise<void>((res, rej) => {
+      v.onloadedmetadata = () => res();
+      v.onerror = () => rej(new Error('The browser cannot play that file. Try an .mp4 (H.264) or .webm.'));
+    });
+    if (startAt > 0 && startAt < v.duration - 1) v.currentTime = startAt;
+    await v.play();
+    const ms: MediaStream | undefined = (v as any).captureStream?.() ?? (v as any).mozCaptureStream?.();
+    if (!ms) throw new Error('This browser cannot capture video from a file. Use Chrome, Edge or Brave.');
+    await begin(ms, { fileName: file.name, fileSize: file.size, source: 'file', position: startAt });
+  };
+
+  const guard = async (fn: () => Promise<void>) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await fn();
+    } catch (e) {
+      cleanup();
+      setLive(false);
+      setError((e as Error).message || 'Could not start the stream.');
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const chooseFile = () =>
+    guard(async () => {
+      const r = await pickVideoFile();
+      if (!r) return;
+      if (r.handle) void saveHandle(code, r.handle);
+      await startFile(r.file, 0);
+    });
+
+  useEffect(() => {
+    // opens the chooser right away; the click that bumped pickSignal is still a fresh user gesture
+    if (pickSignal > 0 && !live && !busy && supported) void chooseFile();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pickSignal]);
+
+  useEffect(() => {
+    // the "Share screen / tab" button in the room bar: the click is still a fresh user gesture
+    if (screenSignal > 0 && !live && !busy && supported && canScreenShare) void shareScreen();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [screenSignal]);
+
+  const resume = () =>
+    guard(async () => {
+      let file: File | null = null;
+      const h = await loadHandle(code);
+      if (h) file = await reopenHandle(h);
+      if (!file) {
+        const r = await pickVideoFile();
+        if (!r) return;
+        file = r.file;
+        if (r.handle) void saveHandle(code, r.handle);
+      }
+      if ((file.name !== stream.fileName || file.size !== stream.fileSize) && !confirm(`This is not the original file ("${stream.fileName}"). Continue anyway?`)) return;
+      await startFile(file, stream.lastPosition);
+    });
+
+  const shareScreen = () =>
+    guard(async () => {
+      // `systemAudio: 'include'` asks Chrome to offer the "Share system audio" checkbox
+      const ms = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: 30 },
+        audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+        systemAudio: 'include',
+      } as DisplayMediaStreamOptions);
+      const v = videoRef.current!;
+      setSource('screen');
+      v.src = '';
+      v.srcObject = ms;
+      v.muted = true; // avoid echo in the host's own tab
+      await v.play();
+      ms.getVideoTracks()[0]?.addEventListener('ended', () => stop());
+      await begin(ms, { fileName: 'Screen share', fileSize: 0, source: 'screen', position: 0 });
+    });
+
+  const stop = () => {
+    send({ t: 'streamStop' });
+    cleanup();
+    setLive(false);
+  };
+
+  const changeQuality = (bps: number) => {
+    setBitrate(bps);
+    streamerRef.current?.setBitrate(bps);
+  };
+
+  const nameOf = (id: string) => members.find((m) => m.id === id)?.nick ?? 'viewer';
+
+  return (
+    <div className="stage-inner host-panel">
+      <div className="video-area" style={{ display: live ? undefined : 'none' }}>
+        <video ref={videoRef} controls={source === 'file'} playsInline />
+      </div>
+
+      {live ? (
+        <div className="host-live">
+          <div className="host-bar">
+            <span className="live-badge">● STREAMING</span>
+            <span className="muted">{stats.length} watching (max {LIMITS.maxViewersStream})</span>
+            <span className="spacer" />
+            <label className="muted">
+              Quality{' '}
+              <select value={bitrate} onChange={(e) => changeQuality(Number(e.target.value))}>
+                {PRESETS.map(([label, bps]) => (
+                  <option key={bps} value={bps}>
+                    {label}
+                  </option>
+                ))}
+                {!PRESETS.some(([, b]) => b === bitrate) && <option value={bitrate}>{(bitrate / 1e6).toFixed(1)} Mbps (auto)</option>}
+              </select>
+            </label>
+            <button className="danger" onClick={stop}>
+              Stop streaming
+            </button>
+          </div>
+          {stats.length > 0 && (
+            <ul className="stats">
+              {stats.map((s) => (
+                <li key={s.id}>
+                  <span>{nameOf(s.id)}</span>
+                  <span className={s.lag > 6 ? 'bad' : 'good'}>{s.lag > 0.5 ? `${formatTime(s.lag)} behind` : 'live'}</span>
+                  <span className="muted">{(s.backlog / 1000).toFixed(0)} KB queued</span>
+                </li>
+              ))}
+            </ul>
+          )}
+          {notice && <p className="warn small">{notice}</p>}
+          <p className="muted small">Pausing or seeking in your player is what everyone sees. Viewers can rewind, never skip ahead.</p>
+        </div>
+      ) : (
+        <div className="host-start">
+          <h2>{resumable ? 'Host reconnected' : 'Stream from your computer'}</h2>
+          <p className="muted">
+            The video goes straight from your browser to viewers (peer to peer). Nothing is uploaded to our server, so keep this tab open.
+          </p>
+          {!supported && <p className="warn">This browser cannot stream video. Use a recent Chrome, Edge or Brave on desktop.</p>}
+          {supported && !isChromium() && <p className="warn">Streaming is tested on Chromium browsers (Chrome, Edge, Brave). Other browsers may not work.</p>}
+          {resumable && (
+            <div className="resume">
+              <p>
+                Resume <b>{stream.fileName || 'your stream'}</b>
+                {stream.source === 'file' && <> from {formatTime(stream.lastPosition)}</>}
+              </p>
+              {stream.source === 'file' ? (
+                <button className="primary" disabled={busy || !supported} onClick={resume}>
+                  Resume stream
+                </button>
+              ) : (
+                <button className="primary" disabled={busy || !supported} onClick={shareScreen}>
+                  Share screen again
+                </button>
+              )}
+            </div>
+          )}
+          <div className="row">
+            <button className="primary" disabled={busy || !supported} onClick={chooseFile}>
+              {resumable ? 'Choose a different file' : 'Choose a video file'}
+            </button>
+            {canScreenShare && (
+              <button disabled={busy || !supported} onClick={shareScreen}>
+                Share a screen / tab
+              </button>
+            )}
+            <label className="muted">
+              Quality{' '}
+              <select value={bitrate} onChange={(e) => setBitrate(Number(e.target.value))}>
+                {PRESETS.map(([label, bps]) => (
+                  <option key={bps} value={bps}>
+                    {label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          {!canScreenShare && (
+            <p className="muted small">Screen sharing is not available in this browser (phones and tablets do not support it, and it needs a secure https page).</p>
+          )}
+          {error && <p className="warn">{error}</p>}
+        </div>
+      )}
+    </div>
+  );
+}
