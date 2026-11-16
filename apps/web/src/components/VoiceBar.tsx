@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { onMedia, send, useRoom } from '../lib/room';
+import { onMedia, onMediaChunk, send, useRoom } from '../lib/room';
 import { useCall } from '../lib/call';
 import { VoiceManager } from '../lib/voice';
 
@@ -19,15 +19,42 @@ export function VoiceBar() {
   pttRef.current = ptt;
   const mutedRef = useRef(false);
   const joiningRef = useRef(false);
-  const aliveRef = useRef(true);
   mutedRef.current = muted;
 
-  // encoded voice and camera chunks from the others in voice, relayed by the room server
+  // In the room, the people in voice are seen and heard straight away: the voice manager starts listening now,
+  // and Join voice only adds sending our own microphone and camera.
+  const myId = me?.id;
+  useEffect(() => {
+    const container = containerRef.current;
+    if (!myId || !container) return;
+    const mgr = new VoiceManager({
+      myId,
+      container,
+      onRemoteVideo: (id, track) => useCall.getState().setRemote(id, track),
+      onRemoteCam: (id, on) => useCall.getState().setRemoteCam(id, on),
+      // the phone can stop the camera by itself: keep the button and our own tile in step with it
+      onCamera: (track) => {
+        setCamOn(track !== null);
+        useCall.getState().setCamera(track);
+      },
+    });
+    mgr.listen();
+    mgrRef.current = mgr;
+    return () => {
+      mgr.close();
+      mgrRef.current = null;
+      useCall.getState().reset();
+    };
+  }, [myId]);
+
+  // from the others in voice, relayed by the room server: small notes (camera on/off, key-frame requests) as
+  // messages, and the encoded voice and camera chunks as binary frames
   useEffect(() => onMedia((m) => mgrRef.current?.handleMedia(m)), []);
+  useEffect(() => onMediaChunk((c) => mgrRef.current?.handleChunk(c)), []);
 
   useEffect(() => {
-    if (inVoice) mgrRef.current?.reconcile(voiceIds);
-  }, [inVoice, voiceIds.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
+    mgrRef.current?.reconcile(voiceIds);
+  }, [myId, voiceIds.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // mic gating: muted, or push-to-talk (hold V)
   useEffect(() => {
@@ -49,37 +76,17 @@ export function VoiceBar() {
     };
   }, [inVoice, muted, ptt]);
 
-  useEffect(
-    () => () => {
-      aliveRef.current = false;
-      mgrRef.current?.leave();
-      useCall.getState().reset();
-    },
-    [],
-  );
-
   const join = async () => {
-    if (!me || !containerRef.current || joiningRef.current) return;
+    const mgr = mgrRef.current;
+    if (!mgr || joiningRef.current) return;
     joiningRef.current = true;
     setError(null);
     try {
-      const mgr = new VoiceManager({
-        myId: me.id,
-        container: containerRef.current,
-        onRemoteVideo: (id, track) => useCall.getState().setRemote(id, track),
-        onRemoteCam: (id, on) => useCall.getState().setRemoteCam(id, on),
-        // the phone can stop the camera by itself: keep the button and our own tile in step with it
-        onCamera: (track) => {
-          setCamOn(track !== null);
-          useCall.getState().setCamera(track);
-        },
-      });
       // camera on last time: ask for microphone and camera together, once
       await mgr.join(localStorage.getItem('wp-cam') === '1');
-      if (!aliveRef.current) return mgr.leave();
+      if (mgrRef.current !== mgr) return mgr.leave(); // left the room while the browser was asking
       setCamOn(mgr.camera !== null);
       useCall.getState().setCamera(mgr.camera);
-      mgrRef.current = mgr;
       setInVoice(true);
       useCall.getState().setInVoice(true);
       send({ t: 'voice', on: true });
@@ -92,12 +99,13 @@ export function VoiceBar() {
     }
   };
 
+  // stops sending our microphone and camera; the others stay visible and audible
   const leave = () => {
     mgrRef.current?.leave();
-    mgrRef.current = null;
     setInVoice(false);
     setCamOn(false);
-    useCall.getState().reset();
+    useCall.getState().setInVoice(false);
+    useCall.getState().setCamera(null);
     send({ t: 'voice', on: false });
   };
 

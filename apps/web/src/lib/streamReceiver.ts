@@ -1,171 +1,133 @@
 /**
  * Viewer side of host-stream mode.
  *
- * Data channel -> MediaSource (WebM, 'sequence' mode) -> <video>
+ * Room server -> pieces of WebM chunks -> MediaSource ('sequence' mode) -> <video>
  *
  * The SourceBuffer is the viewer's DVR: it holds up to `keepSeconds` of history, so the
  * viewer can rewind inside it but never go past its end (the live edge).
  */
+import type { StreamPiece } from './room';
 
 const dbg = (...a: unknown[]): void => console.debug('[stream]', ...a);
 
-export type RecvStatus ='idle' | 'requesting' | 'connecting' | 'live' | 'lost' | 'full' | 'error';
+export type RecvStatus = 'idle' | 'requesting' | 'connecting' | 'live' | 'lost' | 'full' | 'error';
+
+/** No piece for this long while the host should be sending: ask again (they may have reloaded, or dropped us). */
+const SILENCE_MS = 15_000;
 
 export interface ReceiverOptions {
   video: HTMLVideoElement;
-  iceServers: RTCIceServer[];
   signal: (to: string, data: unknown) => void;
   onStatus: (s: RecvStatus) => void;
   keepSeconds?: number;
 }
 
 export class StreamReceiver {
-  private pc: RTCPeerConnection | null = null;
-  private dc: RTCDataChannel | null = null;
   private hostId: string | null = null;
-  private haveRemote = false;
-  private pendingIce: RTCIceCandidateInit[] = [];
   private ms: MediaSource | null = null;
   private sb: SourceBuffer | null = null;
   private codecs = '';
   private appended = false;
   private objectUrl = '';
   private queue: Uint8Array[] = [];
+  /** the chunk being put back together from its pieces */
   private parts: Uint8Array[] = [];
+  private partsChunk = -1;
   private retryTimer: number | undefined;
+  private watchTimer: number | undefined;
   private retries = 0;
+  private live = false;
+  private lastPiece = 0;
   private destroyed = false;
   private keep: number;
 
   constructor(private o: ReceiverOptions) {
     this.keep = o.keepSeconds ?? 1800;
+    this.watchTimer = window.setInterval(() => this.watch(), 3000);
   }
 
   /** Point at the current host (or null when there is none) and (re)connect. */
   setHost(id: string | null): void {
+    if (this.hostId && this.hostId !== id) this.o.signal(this.hostId, { kind: 'stream-bye' });
     this.hostId = id;
     this.retries = 0;
-    this.closeConnection();
+    this.live = false;
+    this.parts = [];
     if (id) this.request();
-    else this.o.onStatus('idle');
+    else {
+      window.clearTimeout(this.retryTimer);
+      this.o.onStatus('idle');
+    }
   }
 
   private request(): void {
     if (this.destroyed || !this.hostId) return;
-    this.o.onStatus('requesting');
+    this.live = false;
+    this.o.onStatus(this.retries > 0 ? 'lost' : 'requesting');
     this.o.signal(this.hostId, { kind: 'stream-request' });
     window.clearTimeout(this.retryTimer);
     // if the host never answers, try again with a growing delay
     this.retryTimer = window.setTimeout(() => {
-      if (this.destroyed || !this.hostId) return;
+      if (this.destroyed || !this.hostId || this.live) return;
       this.retries += 1;
-      this.closeConnection();
       this.request();
     }, Math.min(4000 + this.retries * 2000, 12000));
   }
 
-  async handleSignal(data: any): Promise<void> {
+  /** The host went quiet for a long time while we were watching: ask again. The buffered video stays rewindable. */
+  private watch(): void {
+    if (!this.live || !this.hostId || this.destroyed) return;
+    if (Date.now() - this.lastPiece > SILENCE_MS && !this.o.video.paused) {
+      dbg('no stream data for a while: asking the host again');
+      this.retries = 1;
+      this.request();
+    }
+  }
+
+  handleSignal(data: any): void {
     if (this.destroyed) return;
     switch (data?.kind) {
       case 'stream-full':
         window.clearTimeout(this.retryTimer);
         this.o.onStatus('full');
         return;
-      case 'stream-offer': {
-        this.closeConnection();
-        this.o.onStatus('connecting');
-        const pc = new RTCPeerConnection({ iceServers: this.o.iceServers });
-        this.pc = pc;
-        pc.onicecandidate = (e) => {
-          if (e.candidate && this.hostId) this.o.signal(this.hostId, { kind: 'stream-ice', candidate: e.candidate.toJSON() });
-        };
-        pc.ondatachannel = (e) => this.bindChannel(e.channel);
-        pc.onconnectionstatechange = () => {
-          if (pc !== this.pc) return;
-          if (pc.connectionState === 'failed' || pc.connectionState === 'closed') this.lost();
-        };
-        await pc.setRemoteDescription(data.sdp);
-        this.haveRemote = true;
-        for (const c of this.pendingIce.splice(0)) await pc.addIceCandidate(c).catch(() => undefined);
-        await pc.setLocalDescription(await pc.createAnswer());
-        if (this.hostId) this.o.signal(this.hostId, { kind: 'stream-answer', sdp: pc.localDescription });
-        return;
-      }
-      case 'stream-ice':
-        if (!data.candidate) return;
-        if (this.pc && this.haveRemote) await this.pc.addIceCandidate(data.candidate).catch(() => undefined);
-        else this.pendingIce.push(data.candidate);
+      case 'stream-hello':
+        if (typeof data.codecs !== 'string') return;
+        window.clearTimeout(this.retryTimer);
+        this.retries = 0;
+        this.live = true;
+        this.lastPiece = Date.now();
+        this.setupMse(data.codecs);
+        this.o.onStatus('live');
         return;
     }
   }
 
-  private bindChannel(dc: RTCDataChannel): void {
-    this.dc = dc;
-    dc.binaryType = 'arraybuffer';
-    dc.onopen = () => {
-      window.clearTimeout(this.retryTimer);
-      this.retries = 0;
-      this.o.onStatus('live');
-    };
-    dc.onclose = () => {
-      if (dc === this.dc) this.lost();
-    };
-    dc.onmessage = (ev) => {
-      if (typeof ev.data === 'string') {
-        try {
-          const m = JSON.parse(ev.data) as { t: string; codecs?: string };
-          if (m.t === 'hello' && m.codecs) this.setupMse(m.codecs);
-        } catch {
-          /* ignore */
-        }
-        return;
-      }
-      const u8 = new Uint8Array(ev.data as ArrayBuffer);
-      if (u8.length < 2) return;
-      this.parts.push(u8.subarray(1));
-      if (u8[0] & 1) {
-        const total = this.parts.reduce((n, p) => n + p.length, 0);
-        const out = new Uint8Array(total);
-        let off = 0;
-        for (const p of this.parts) {
-          out.set(p, off);
-          off += p.length;
-        }
-        this.parts = [];
-        this.queue.push(out);
-        this.pump();
-      }
-    };
-  }
-
-  /** Connection dropped but the host still wants to stream: retry. The buffered video stays rewindable. */
-  private lost(): void {
-    this.closeConnection();
-    if (this.destroyed || !this.hostId) return;
-    this.o.onStatus('lost');
-    window.clearTimeout(this.retryTimer);
-    this.retryTimer = window.setTimeout(() => this.request(), Math.min(1500 + this.retries * 1500, 10000));
-    this.retries += 1;
-  }
-
-  private closeConnection(): void {
+  /** One piece of a chunk from the host. A chunk is only used when all its pieces arrived in order. */
+  handlePiece(p: StreamPiece): void {
+    if (this.destroyed || p.from !== this.hostId) return;
+    this.lastPiece = Date.now();
+    if (p.first) {
+      this.parts = [p.bytes.slice()];
+      this.partsChunk = p.chunk;
+    } else if (this.parts.length > 0 && p.chunk === this.partsChunk) {
+      this.parts.push(p.bytes.slice());
+    } else {
+      // a piece of a chunk whose start we never got: it is useless on its own
+      this.parts = [];
+      return;
+    }
+    if (!p.last) return;
+    const total = this.parts.reduce((n, x) => n + x.length, 0);
+    const out = new Uint8Array(total);
+    let off = 0;
+    for (const x of this.parts) {
+      out.set(x, off);
+      off += x.length;
+    }
     this.parts = [];
-    this.haveRemote = false;
-    this.pendingIce = [];
-    const dc = this.dc;
-    const pc = this.pc;
-    this.dc = null;
-    this.pc = null;
-    try {
-      dc?.close();
-    } catch {
-      /* ignore */
-    }
-    try {
-      pc?.close();
-    } catch {
-      /* ignore */
-    }
+    this.queue.push(out);
+    this.pump();
   }
 
   // --------------------------------------------------------------------- MSE
@@ -286,13 +248,14 @@ export class StreamReceiver {
   }
 
   sendLag(seconds: number): void {
-    if (this.dc?.readyState === 'open') this.dc.send(JSON.stringify({ t: 'lag', v: Math.max(0, seconds) }));
+    if (this.live && this.hostId) this.o.signal(this.hostId, { kind: 'stream-lag', v: Math.max(0, seconds) });
   }
 
   destroy(): void {
+    if (this.hostId) this.o.signal(this.hostId, { kind: 'stream-bye' });
     this.destroyed = true;
     window.clearTimeout(this.retryTimer);
-    this.closeConnection();
+    window.clearInterval(this.watchTimer);
     this.disposeMse();
     this.o.video.removeAttribute('src');
   }

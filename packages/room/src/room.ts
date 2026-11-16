@@ -1,6 +1,10 @@
 import {
   ClientMsg,
   LIMITS,
+  MEDIA_AUDIO,
+  MEDIA_HEADER,
+  MEDIA_STREAM,
+  MEDIA_VIDEO,
   canControlPlayback,
   filterText,
   parseLink,
@@ -19,7 +23,8 @@ import {
 
 /** The small slice of the WebSocket API the room needs. Cloudflare sockets and Node `ws` both fit. */
 export interface WebSocketLike {
-  send(data: string): void;
+  /** text for room messages, bytes for voice and camera frames */
+  send(data: string | Uint8Array): void;
   /** bytes waiting to go out on this connection, when the runtime reports it (Node's ws does) */
   bufferedAmount?: number;
   close(code?: number, reason?: string): void;
@@ -41,6 +46,9 @@ interface Conn {
   msgTimes: number[];
   lastTyping: number;
   lastReaction: number;
+  /** voice and camera frames in the current second (they have their own limit, apart from room messages) */
+  mediaWindow: number;
+  mediaCount: number;
 }
 
 const emptySync = (): SyncState => ({
@@ -75,6 +83,10 @@ export class RoomCore {
   private locked = false;
   private repeat: RepeatMode = 'off';
   private conns = new Map<string, Conn>();
+  /** "receiver|sender" pairs whose video is paused until a key frame, with when the sender was last asked for one */
+  private videoHold = new Map<string, number>();
+  /** stream viewers who fell behind, with when the host was last told */
+  private streamSlow = new Map<string, number>();
   private known = new Set<string>();
   private banned = new Set<string>();
   private sync = emptySync();
@@ -138,7 +150,12 @@ export class RoomCore {
     }, 10_000);
 
     ws.addEventListener('message', (ev: { data: unknown }) => {
-      if (typeof ev.data !== 'string' || ev.data.length > 20_000) return;
+      // voice and camera arrive as binary frames: no JSON, and their own size and rate limits
+      if (typeof ev.data !== 'string') {
+        if (conn) this.onMediaFrame(conn, ev.data);
+        return;
+      }
+      if (ev.data.length > 20_000) return;
       let raw: unknown;
       try {
         raw = JSON.parse(ev.data);
@@ -168,6 +185,101 @@ export class RoomCore {
     };
     ws.addEventListener('close', onClose);
     ws.addEventListener('error', onClose);
+  }
+
+  /**
+   * One encoded piece of someone's voice or camera. It is passed on unchanged to the other people in voice, with the
+   * sender's id in front. Nothing is decoded here.
+   */
+  private onMediaFrame(c: Conn, data: unknown): void {
+    const frame = data instanceof Uint8Array ? data : data instanceof ArrayBuffer ? new Uint8Array(data) : null;
+    if (!frame || frame.length < MEDIA_HEADER || frame.length > LIMITS.mediaFrame) return;
+    const kind = frame[0];
+    if (kind !== MEDIA_AUDIO && kind !== MEDIA_VIDEO && kind !== MEDIA_STREAM) return;
+    const now = Date.now();
+    if (now - c.mediaWindow >= 1000) {
+      c.mediaWindow = now;
+      c.mediaCount = 0;
+    }
+    if (++c.mediaCount > LIMITS.mediaFramesPerSec) return;
+    if (kind === MEDIA_STREAM) return this.onStreamPiece(c, frame, now);
+    if (!c.member.voice) return;
+
+    const id = new TextEncoder().encode(c.member.id);
+    const out = new Uint8Array(1 + id.length + frame.length);
+    out[0] = id.length;
+    out.set(id, 1);
+    out.set(frame, 1 + id.length);
+    const key = (frame[1]! & 1) === 1;
+
+    for (const x of this.conns.values()) {
+      // everyone in the room receives it, in voice or not: watching and listening need no Join voice
+      if (x === c) continue;
+      if (kind === MEDIA_VIDEO) {
+        // A receiver whose connection is backed up misses video, not sound. Frames after a skipped one depend on
+        // it, so nothing more goes to them until a key frame; the sender is asked for one once they have caught up.
+        const pair = `${x.member.id}|${c.member.id}`;
+        const holding = this.videoHold.has(pair);
+        const backed = (x.ws.bufferedAmount ?? 0) > LIMITS.mediaBacklog;
+        if (backed || (holding && !key)) {
+          const asked = this.videoHold.get(pair) ?? 0;
+          if (!holding) this.videoHold.set(pair, 0);
+          if (!backed && now - asked > 1000) {
+            this.videoHold.set(pair, now);
+            this.send(c, { t: 'media', from: x.member.id, kind: 'keyreq', ts: 0 });
+          }
+          continue;
+        }
+        if (holding) this.videoHold.delete(pair);
+      }
+      try {
+        x.ws.send(out);
+      } catch {
+        /* socket already closing */
+      }
+    }
+  }
+
+  /**
+   * A piece of the host's own stream, addressed to the viewers who are ready for it. Each listed viewer gets it
+   * unchanged (with the host's id in front and the address list removed). A viewer whose connection is backed up is
+   * skipped, and the host is told, so it starts a fresh recording they can pick up from.
+   */
+  private onStreamPiece(c: Conn, frame: Uint8Array, now: number): void {
+    if (c.member.role !== 'host' || this.sync.mode !== 'stream') return;
+    let at = MEDIA_HEADER;
+    const count = frame[at++] ?? 0;
+    const targets: string[] = [];
+    const text = new TextDecoder();
+    for (let i = 0; i < count; i++) {
+      const len = frame[at++] ?? 0;
+      if (at + len > frame.length) return;
+      targets.push(text.decode(frame.subarray(at, at + len)));
+      at += len;
+    }
+    const id = new TextEncoder().encode(c.member.id);
+    const out = new Uint8Array(1 + id.length + MEDIA_HEADER + (frame.length - at));
+    out[0] = id.length;
+    out.set(id, 1);
+    out.set(frame.subarray(0, MEDIA_HEADER), 1 + id.length);
+    out.set(frame.subarray(at), 1 + id.length + MEDIA_HEADER);
+    for (const t of targets) {
+      const x = this.conns.get(t);
+      if (!x || x === c) continue;
+      if ((x.ws.bufferedAmount ?? 0) > LIMITS.streamBacklog) {
+        // at most one report every 2 s per viewer, while they stay behind
+        if (now - (this.streamSlow.get(t) ?? 0) > 2000) {
+          this.streamSlow.set(t, now);
+          this.send(c, { t: 'signal', from: t, data: { kind: 'stream-slow' } });
+        }
+        continue;
+      }
+      try {
+        x.ws.send(out);
+      } catch {
+        /* socket already closing */
+      }
+    }
   }
 
   private rateOk(c: Conn): boolean {
@@ -339,6 +451,8 @@ export class RoomCore {
       msgTimes: [],
       lastTyping: 0,
       lastReaction: 0,
+      mediaWindow: 0,
+      mediaCount: 0,
     };
     this.conns.set(id, conn);
     this.known.add(id);
@@ -657,29 +771,17 @@ export class RoomCore {
 
       // ------------------------------------------------------------ voice relay
       case 'media': {
-        // only people in voice are sent media, and only while they are in voice themselves
-        if (!c.member.voice) return;
+        // Everyone in the room can watch and hear the people in voice; only people in voice send.
         if (msg.kind === 'keyreq') {
-          // a viewer's decoder lost its place: only the person sending that picture needs to hear it
+          // a viewer's decoder lost its place, or they just started watching: only that sender needs to hear it
           const target = msg.to ? this.conns.get(msg.to) : undefined;
           if (target && target !== c && target.member.voice) this.send(target, { t: 'media', from: c.member.id, kind: 'keyreq', ts: 0 });
           return;
         }
+        // camera on / off: a small note to everyone else (sound and pictures go as binary frames, see onMediaFrame)
+        if (msg.kind !== 'cam' || !c.member.voice) return;
         for (const x of this.conns.values()) {
-          if (x === c || !x.member.voice) continue;
-          // a receiver whose connection is backed up misses video, not sound; the picture comes back on its next request
-          if (msg.kind === 'video' && (x.ws.bufferedAmount ?? 0) > LIMITS.mediaBacklog) continue;
-          this.send(x, {
-            t: 'media',
-            from: c.member.id,
-            kind: msg.kind,
-            ts: msg.ts,
-            key: msg.key,
-            on: msg.on,
-            rate: msg.rate,
-            ch: msg.ch,
-            data: msg.data,
-          });
+          if (x !== c) this.send(x, { t: 'media', from: c.member.id, kind: 'cam', ts: 0, on: msg.on });
         }
         return;
       }

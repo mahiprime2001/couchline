@@ -11,9 +11,30 @@ export const LIMITS = {
   queueMax: 200, // room for a whole YouTube playlist
   graceLinkMs: 5 * 60_000,
   graceStreamMs: 20 * 60_000,
-  mediaBacklog: 512_000, // bytes queued for one person before their video is skipped (sound is never skipped)
+  mediaBacklog: 150_000, // bytes queued for one person (about 2 s of one camera) before their video is skipped; sound is never skipped
+  streamBacklog: 4_000_000, // bytes queued for one stream viewer before they are skipped and the host starts afresh for them
+  mediaFrame: 256_000, // bytes in one binary voice or camera frame (a key frame of a 640-wide picture is well under this)
+  mediaFramesPerSec: 200, // per person: 50 of sound and up to 30 of picture, with room to spare
   mediaChunk: 300_000, // characters of base64 in one encoded audio or video chunk (a key frame can be ~200 KB)
 } as const;
+
+/**
+ * Voice and camera travel as binary WebSocket frames, not JSON: a fixed header, then the encoded chunk.
+ *   [0] kind (MEDIA_AUDIO or MEDIA_VIDEO)   [1] flags (bit 0: key frame)   [2] audio channels   [3] unused
+ *   [4..8) chunk number, uint32             [8..12) audio sample rate, uint32
+ *   [12..20) timestamp in microseconds, float64        (all little-endian)
+ * The server puts the sender in front before passing it on: [0] id length, then the id, then the frame above.
+ */
+export const MEDIA_HEADER = 20;
+export const MEDIA_AUDIO = 1;
+export const MEDIA_VIDEO = 2;
+/**
+ * A piece of the host's own stream (file or screen, recorded as WebM). Header flags: bit 0 last piece of a chunk,
+ * bit 1 first piece; the chunk number is in [4..8). From the host, the header is followed by the viewers it is for:
+ * [count], then [id length][id] for each. The server removes that list before passing the piece on.
+ */
+export const MEDIA_STREAM = 3;
+export const STREAM_PIECE = 180_000; // bytes of a stream chunk per piece, so every piece fits in one media frame
 
 /** With this many people or fewer in a room, everyone can play, pause, skip and add videos; above it only the host and organizers can. */
 export const OPEN_PLAYBACK_MAX_MEMBERS = 3;
@@ -104,6 +125,8 @@ export const ClientMsg = z.discriminatedUnion('t', [
     data: z.string().max(LIMITS.mediaChunk).optional(),
     /** 'keyreq' only: who should send a key frame */
     to: z.string().max(64).optional(),
+    /** video only: counts up by one per chunk, so a receiver can tell when one went missing */
+    seq: z.number().int().min(0).max(1e12).optional(),
   }),
 
   // polls

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { useToast } from './toast';
+import { MEDIA_AUDIO, MEDIA_HEADER, MEDIA_STREAM, MEDIA_VIDEO } from '@wp/shared';
 import type {
   ChatMsg,
   ClientMsg,
@@ -118,6 +119,109 @@ export function onMedia(fn: MediaFn): () => void {
   return () => mediaFns.delete(fn);
 }
 
+/** One encoded piece of someone else's voice or camera, as it arrived in a binary frame. */
+export interface MediaChunk {
+  from: string;
+  kind: 'audio' | 'video';
+  key: boolean;
+  ch: number;
+  seq: number;
+  rate: number;
+  /** microseconds on the sender's clock */
+  ts: number;
+  bytes: Uint8Array;
+}
+type ChunkFn = (c: MediaChunk) => void;
+const chunkFns = new Set<ChunkFn>();
+export function onMediaChunk(fn: ChunkFn): () => void {
+  chunkFns.add(fn);
+  return () => chunkFns.delete(fn);
+}
+
+/** A binary frame from the server: the sender's id, then the header and chunk they sent (see MEDIA_HEADER in @wp/shared). */
+function handleMediaFrame(buf: ArrayBuffer): void {
+  const all = new Uint8Array(buf);
+  const at = 1 + (all[0] ?? 0);
+  if (all.length < at + MEDIA_HEADER) return;
+  const view = new DataView(buf, at, MEDIA_HEADER);
+  const kind = view.getUint8(0);
+  if (kind === MEDIA_STREAM) {
+    const flags = view.getUint8(1);
+    const piece: StreamPiece = {
+      from: new TextDecoder().decode(all.subarray(1, at)),
+      chunk: view.getUint32(4, true),
+      first: (flags & 2) === 2,
+      last: (flags & 1) === 1,
+      bytes: all.subarray(at + MEDIA_HEADER),
+    };
+    streamFns.forEach((f) => f(piece));
+    return;
+  }
+  if (kind !== MEDIA_AUDIO && kind !== MEDIA_VIDEO) return;
+  const chunk: MediaChunk = {
+    from: new TextDecoder().decode(all.subarray(1, at)),
+    kind: kind === MEDIA_AUDIO ? 'audio' : 'video',
+    key: (view.getUint8(1) & 1) === 1,
+    ch: view.getUint8(2),
+    seq: view.getUint32(4, true),
+    rate: view.getUint32(8, true),
+    ts: view.getFloat64(12, true),
+    bytes: all.subarray(at + MEDIA_HEADER),
+  };
+  chunkFns.forEach((f) => f(chunk));
+}
+
+/** A piece of the host's stream (a WebM chunk is sent in one or more pieces; see MEDIA_STREAM in @wp/shared). */
+export interface StreamPiece {
+  from: string;
+  chunk: number;
+  first: boolean;
+  last: boolean;
+  bytes: Uint8Array;
+}
+type StreamFn = (p: StreamPiece) => void;
+const streamFns = new Set<StreamFn>();
+export function onStreamPiece(fn: StreamFn): () => void {
+  streamFns.add(fn);
+  return () => streamFns.delete(fn);
+}
+
+/** Host only: sends one piece of a stream chunk through the server to the listed viewers. */
+export function sendStreamPiece(viewers: string[], bytes: Uint8Array, o: { chunk: number; first: boolean; last: boolean }): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN || viewers.length === 0) return;
+  const ids = viewers.map((id) => new TextEncoder().encode(id));
+  const list = 1 + ids.reduce((n, id) => n + 1 + id.length, 0);
+  const out = new Uint8Array(MEDIA_HEADER + list + bytes.length);
+  const view = new DataView(out.buffer);
+  view.setUint8(0, MEDIA_STREAM);
+  view.setUint8(1, (o.last ? 1 : 0) | (o.first ? 2 : 0));
+  view.setUint32(4, o.chunk >>> 0, true);
+  let at = MEDIA_HEADER;
+  out[at++] = ids.length;
+  for (const id of ids) {
+    out[at++] = id.length;
+    out.set(id, at);
+    at += id.length;
+  }
+  out.set(bytes, at);
+  ws.send(out);
+}
+
+/** Sends one encoded piece of our voice or camera as a binary frame: no JSON and no base64. */
+export function sendMedia(kind: 'audio' | 'video', bytes: Uint8Array, o: { key: boolean; ts: number; seq: number; rate?: number; ch?: number }): void {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const out = new Uint8Array(MEDIA_HEADER + bytes.length);
+  const view = new DataView(out.buffer);
+  view.setUint8(0, kind === 'audio' ? MEDIA_AUDIO : MEDIA_VIDEO);
+  view.setUint8(1, o.key ? 1 : 0);
+  view.setUint8(2, o.ch ?? 0);
+  view.setUint32(4, o.seq >>> 0, true);
+  view.setUint32(8, o.rate ?? 0, true);
+  view.setFloat64(12, o.ts, true);
+  out.set(bytes, MEDIA_HEADER);
+  ws.send(out);
+}
+
 export function onSignal(fn: SignalFn): () => void {
   signalFns.add(fn);
   return () => signalFns.delete(fn);
@@ -134,16 +238,6 @@ export function requestSeek(seconds: number): void {
   seekFns.forEach((f) => f(seconds));
 }
 
-// --------------------------------------------------------------------- ICE
-
-let icePromise: Promise<RTCIceServer[]> | null = null;
-export function getIceServers(): Promise<RTCIceServer[]> {
-  icePromise ??= fetch('/api/ice')
-    .then((r) => r.json() as Promise<{ iceServers: RTCIceServer[] }>)
-    .then((j) => j.iceServers)
-    .catch(() => [{ urls: ['stun:stun.l.google.com:19302'] }]);
-  return icePromise;
-}
 
 // -------------------------------------------------------------- connection
 
@@ -176,7 +270,6 @@ export function joinRoom(o: JoinOpts): void {
   attempts = 0;
   opts = { ...o };
   useRoom.setState({ ...initial(), status: 'connecting', code: o.code });
-  void getIceServers();
   open();
 }
 
@@ -206,6 +299,7 @@ function open(): void {
   const o = opts;
   const proto = location.protocol === 'https:' ? 'wss' : 'ws';
   const sock = new WebSocket(`${proto}://${location.host}/ws/${o.code}`);
+  sock.binaryType = 'arraybuffer'; // voice and camera frames
   ws = sock;
 
   sock.onopen = () => {
@@ -222,6 +316,7 @@ function open(): void {
   };
 
   sock.onmessage = (ev) => {
+    if (ev.data instanceof ArrayBuffer) return handleMediaFrame(ev.data);
     let msg: ServerMsg;
     try {
       msg = JSON.parse(ev.data as string) as ServerMsg;
@@ -328,6 +423,11 @@ function handle(msg: ServerMsg): void {
       return;
     }
   }
+}
+
+/** Bytes still waiting to leave this device. Voice skips sending while this is high, so delay does not pile up. */
+export function sendBacklog(): number {
+  return ws?.bufferedAmount ?? 0;
 }
 
 export function send(msg: Outgoing): void {

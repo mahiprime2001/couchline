@@ -67,7 +67,19 @@ host.send({ t: 'load', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ' });
 const s1 = await viewer.waitFor((m) => m.t === 'sync' && m.sync.mode === 'link');
 check('host load syncs viewer', s1?.sync.videoId === 'dQw4w9WgXcQ' && s1.sync.playing);
 
-host.send({ t: 'load', url: 'https://evil.example/x' });
+// with 3 people or fewer, anyone can control playback
+viewer.send({ t: 'control', action: 'seek', position: 777 });
+check('in a room of 2, a viewer can control playback', !!(await host.waitFor((m) => m.t === 'sync' && m.sync.position === 777)));
+
+// two more people: above 3, only the host and organizers can (the checks below)
+const extra1 = client(code, 'Extra1');
+await extra1.join();
+const extra2 = client(code, 'Extra2');
+await extra2.join();
+check('host sees 4 members', !!(await host.waitFor((m) => m.t === 'members' && m.members.length === 4)));
+
+// any https page is a site link (yt-dlp decides later), so a plain-http page is the link that is always refused
+host.send({ t: 'load', url: 'http://evil.example/x' });
 check('bad link rejected', !!(await host.waitFor((m) => m.t === 'error' && m.code === 'bad_link')));
 
 viewer.send({ t: 'control', action: 'seek', position: 999 });

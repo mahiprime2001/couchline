@@ -51,6 +51,23 @@ await viewer.fill('input[placeholder="Your nickname"]', 'ViewerUser');
 await viewer.click('button:has-text("Join")');
 await viewer.waitForSelector('video', { timeout: 10000 });
 
+// In a room of 3 or fewer, everyone controls playback. Two more people make it 4, so the checks below are about
+// a plain viewer (only the host and organizers control playback).
+for (const nick of ['Extra1', 'Extra2']) {
+  const extra = await (await browser.newContext()).newPage();
+  await extra.goto(roomUrl);
+  await extra.fill('input[placeholder="Your nickname"]', nick);
+  await extra.click('button:has-text("Join")');
+  await extra.waitForSelector('.room', { timeout: 10000 });
+}
+check('viewer is a plain viewer in a room of 4', await viewer.locator('text=Play for everyone').count().then(async (n) => {
+  for (let i = 0; i < 20 && n > 0; i++) {
+    await sleep(200);
+    n = await viewer.locator('text=Play for everyone').count();
+  }
+  return n === 0;
+}));
+
 const t = (p) => p.evaluate(() => { const v = document.querySelector('video'); return { cur: v.currentTime, paused: v.paused, ready: v.readyState }; });
 await sleep(4000);
 const [h1, v1] = [await t(host), await t(viewer)];

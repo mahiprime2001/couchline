@@ -63,7 +63,7 @@ export function Landing({ navigate }: { navigate: (p: string) => void }) {
           <b>Link mode</b> YouTube and direct video links stay in sync for everyone.
         </li>
         <li>
-          <b>Host stream</b> Play a local file or tab; it streams peer to peer from your computer.
+          <b>Host stream</b> Play a local file or tab; it streams live from your computer to everyone in the room.
         </li>
         <li>
           <b>Live, rewind-only</b> Viewers can go back, never ahead of the host.

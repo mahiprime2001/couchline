@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef, useState } from 'react';
 import { LIMITS, formatTime } from '@wp/shared';
-import { getIceServers, onSignal, send, useRoom } from '../lib/room';
+import { onSignal, send, useRoom } from '../lib/room';
 import { HostStreamer, pickCodecs, type ViewerStat } from '../lib/hostStreamer';
 import { loadHandle, pickVideoFile, reopenHandle, saveHandle } from '../lib/fileHandle';
 import { useHostedFallback } from '../lib/hostedFallback';
@@ -62,18 +62,24 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
   // getDisplayMedia is missing on phone browsers, and on plain-http pages (not a secure context)
   const canScreenShare = typeof navigator.mediaDevices?.getDisplayMedia === 'function';
   const codecs = pickCodecs();
-  const supported = codecs !== null && typeof RTCPeerConnection !== 'undefined';
+  // the stream goes through the room server, so only recording WebM matters here
+  const supported = codecs !== null;
   const resumable = sync.mode === 'stream' && !stream.live && !live;
 
   useEffect(
     () =>
       onSignal((from, data) => {
         if (typeof data?.kind === 'string' && data.kind.startsWith('stream-')) {
-          void streamerRef.current?.handleSignal(from, data);
+          streamerRef.current?.handleSignal(from, data);
         }
       }),
     [],
   );
+
+  // someone who leaves the room stops being sent the stream
+  useEffect(() => {
+    streamerRef.current?.keepOnly(members.map((m) => m.id));
+  }, [members]);
 
   const cleanup = () => {
     window.clearInterval(posTimer.current);
@@ -122,12 +128,10 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
     const streamCodecs = pickCodecs(hasAudio);
     if (!streamCodecs) throw new Error('This browser cannot encode WebM streams.');
     mediaRef.current = ms;
-    const iceServers = await getIceServers();
     const streamer = new HostStreamer({
       stream: ms,
       codecs: streamCodecs,
       bitrate,
-      iceServers,
       maxViewers: LIMITS.maxViewersStream,
       signal: (to, data) => send({ t: 'signal', to, data }),
       onStats: setStats,
@@ -326,7 +330,7 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
         <div className="host-start">
           <h2>{resumable ? 'Host reconnected' : 'Stream from your computer'}</h2>
           <p className="muted">
-            The video goes straight from your browser to viewers (peer to peer). Nothing is uploaded to our server, so keep this tab open.
+            The video streams live from this tab to everyone in the room. Nothing is stored on the server, so keep this tab open.
           </p>
           {!supported && <p className="warn">This browser cannot stream video. Use a recent Chrome, Edge or Brave on desktop.</p>}
           {supported && !isChromium() && <p className="warn">Streaming is tested on Chromium browsers (Chrome, Edge, Brave). Other browsers may not work.</p>}

@@ -26,6 +26,16 @@ await viewer.fill('input[placeholder="Your nickname"]', 'ViewerUser');
 await viewer.click('button:has-text("Join")');
 await viewer.waitForSelector('.side', { timeout: 10000 });
 
+// In a room of 3 or fewer, everyone controls playback and adds straight to Up next. Two more people make it 4, so
+// the viewer's link is a suggestion the host has to play.
+for (const nick of ['Extra1', 'Extra2']) {
+  const extra = await (await browser.newContext()).newPage();
+  await extra.goto(host.url());
+  await extra.fill('input[placeholder="Your nickname"]', nick);
+  await extra.click('button:has-text("Join")');
+  await extra.waitForSelector('.room', { timeout: 10000 });
+}
+
 await host.waitForSelector('text=Auto yt-dlp for YouTube', { timeout: 10000 });
 check('auto yt-dlp is on by default for the host', await host.isChecked('label:has-text("Auto yt-dlp") input'));
 check('viewers do not get the toggle', (await viewer.locator('text=Auto yt-dlp for YouTube').count()) === 0);

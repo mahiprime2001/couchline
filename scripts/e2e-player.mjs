@@ -84,6 +84,15 @@ await v.goto(room);
 await v.fill('input[placeholder="Your nickname"]', 'Viewer');
 await v.click('button:has-text("Join")');
 await v.waitForSelector('video');
+// In a room of 3 or fewer, everyone controls playback (and speed is only for viewers who do not). Two more people
+// make it 4, so this is a plain viewer.
+for (const nick of ['Extra1', 'Extra2']) {
+  const extra = await mk();
+  await extra.goto(room);
+  await extra.fill('input[placeholder="Your nickname"]', nick);
+  await extra.click('button:has-text("Join")');
+  await extra.waitForSelector('.room');
+}
 await sleep(6000);
 
 // ---- the settings menu lists what the file contains

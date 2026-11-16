@@ -290,7 +290,8 @@ const server = createServer((req, res) => {
 
 server.requestTimeout = 0; // a big upload on a slow connection can take far longer than Node's 5-minute default
 
-const wss = new WebSocketServer({ noServer: true, maxPayload: 32 * 1024 });
+// room messages are small (the room rejects text over 20 000 characters); the ceiling is for one camera key frame
+const wss = new WebSocketServer({ noServer: true, maxPayload: 300 * 1024 });
 const alive = new WeakSet<WebSocket>();
 
 server.on('upgrade', (req, socket, head) => {

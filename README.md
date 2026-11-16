@@ -3,9 +3,10 @@
 Watch videos together in a room, like a Discord channel. No accounts, no database, nothing stored.
 
 - **Link mode:** paste a YouTube link (or a direct .mp4/.webm/.mov link). Everyone stays in sync.
-- **Host stream:** the host plays a file from their own computer (or shares a tab/screen) and it streams peer to peer (WebRTC) to the viewers. The server only relays the handshake.
+- **Host stream:** the host plays a file from their own computer (or shares a tab/screen) and it streams live through the room server to the viewers. Nothing is stored on the server.
 - **Live, rewind-only:** viewers can go back, never ahead of the host. A "Go live" button jumps back.
-- **Rooms:** chat (memory only, gone when the room closes), people list, roles (host/mod), kick/mute, lock + password, queue with voting, polls, reactions, voice chat, subtitles, QR invite.
+- **Voice and cameras:** encoded in the browser and passed on by the room server, so they work on any network. Everyone in the room sees and hears the people in voice; joining voice is only needed to send your own microphone and camera.
+- **Rooms:** chat (memory only, gone when the room closes), people list, roles (host/mod), kick/mute, lock + password, queue with voting, polls, reactions, subtitles, QR invite.
 
 ## Run it locally
 
@@ -37,7 +38,7 @@ Browsers only allow screen sharing and the microphone on `https://` pages or `ht
 pnpm tunnel       # prints https://<random-words>.trycloudflare.com
 ```
 
-Open that address on any device, from any network. It is a free Cloudflare quick tunnel: no account, the address changes every time and stops when you close the terminal. Only the page and the room messages go through the tunnel; the video itself still goes directly between the browsers. `pnpm setup-tools` puts the official cloudflared for your OS in `tools/cloudflared` (ignored by git); an installed `cloudflared` works too. For `pnpm start` (everything on one port) use `pnpm tunnel -- 8787`. Anyone who has the address can open the site, so share it only with people you want in your rooms.
+Open that address on any device, from any network. It is a free Cloudflare quick tunnel: no account, the address changes every time and stops when you close the terminal. Everything goes through the tunnel, including voice, cameras and the host stream, so devices on the same Wi-Fi get less delay by opening the computer's own address instead (`pnpm dev:https` serves it over https). `pnpm setup-tools` puts the official cloudflared for your OS in `tools/cloudflared` (ignored by git); an installed `cloudflared` works too. For `pnpm start` (everything on one port) use `pnpm tunnel -- 8787`. Anyone who has the address can open the site, so share it only with people you want in your rooms.
 
 ## Upload & host (YouTube-style, any format)
 
@@ -57,7 +58,7 @@ The host can press **☁️ Upload & host (any format)** in the room. The file g
 - **Queue:** shuffle, and repeat (off / loop the list / repeat this video). Host and mods control both.
 - **Appearance:** light or dark theme and an accent colour (Room tab). Saved in your browser only.
 - **Only the host can upload** (checked with the room's secret host token). Hosted videos are played through the same synced, rewind-only player as links.
-- **This uses the server's disk and bandwidth** (every viewer downloads the chunks from it), unlike streaming from the host's computer, which goes browser to browser. You also host whatever people upload, so think about abuse and copyright before opening it to strangers.
+- **This uses the server's disk and bandwidth** (every viewer downloads the chunks from it), unlike the host stream, which is passed on live and never stored. You also host whatever people upload, so think about abuse and copyright before opening it to strangers.
 
 ## Tests
 
@@ -65,6 +66,7 @@ The host can press **☁️ Upload & host (any format)** in the room. The file g
 pnpm test         # unit tests (shared logic)
 pnpm typecheck
 pnpm smoke        # WebSocket protocol checks; needs `pnpm dev` running
+pnpm smoke:voice  # voice, camera and host-stream relay checks (binary frames); needs `pnpm dev` running
 pnpm e2e          # real Chrome: link mode + host-stream mode; needs `pnpm dev` and Chrome/Edge installed
 ```
 
@@ -78,9 +80,9 @@ pnpm e2e          # real Chrome: link mode + host-stream mode; needs `pnpm dev` 
 ## Limits (by design)
 
 - **Host-stream is Chromium-only** (Chrome, Edge, Brave on desktop). It needs `MediaRecorder` + `MediaSource` + `captureStream()`.
-- **Host upload bandwidth** is the ceiling: each viewer gets their own copy from the host. The cap is 8 viewers per streamed room. Quality presets: 0.8 / 1.5 / 2.5 Mbps; the app lowers it automatically if a viewer can't keep up.
+- **Server bandwidth** is the ceiling: the host uploads the stream once and the server sends each viewer a copy, and every voice and camera is sent to everyone in the room. The cap is 8 viewers per streamed room. Quality presets: 0.8 / 1.5 / 2.5 Mbps; the app lowers it automatically if a viewer can't keep up.
+- **Voice and cameras** need WebCodecs (a recent Chrome or Edge, including Chrome on Android) on an https page or localhost. Cameras start small and step up while the connection keeps up.
 - **Rewind buffer** is kept in each viewer's memory, up to 30 minutes. A refresh loses it. Late joiners can rewind to the moment they joined.
-- **Behind strict NATs/firewalls** a direct connection can fail. Configure TURN (below).
 - **YouTube** must allow embedding. Vimeo and other sites are not supported.
 - Kick/ban applies to the browser tab's session; someone can rejoin from a new tab unless the room is locked or has a password.
 
@@ -102,21 +104,15 @@ npx wrangler login
 pnpm deploy       # builds the web app, deploys the Worker + Durable Object + static assets
 ```
 
-Optional TURN relay (recommended for real use), using Cloudflare Calls TURN:
-
-```bash
-cd apps/worker
-npx wrangler secret put TURN_KEY_ID -c wrangler.deploy.toml
-npx wrangler secret put TURN_API_TOKEN -c wrangler.deploy.toml
-```
+No TURN or other relay service is needed: voice, cameras and the host stream all go through the room backend itself.
 
 ## Layout
 
 ```
-apps/web       React + Vite UI, WebRTC host streamer / viewer receiver, voice
+apps/web       React + Vite UI, host stream recorder / player, voice and cameras (WebCodecs)
 apps/server    Node backend (default): HTTP API + WebSocket rooms + serves the built web app
 apps/worker    Cloudflare backend: Worker + Durable Object wrapper around the same room code
-packages/room  the room logic itself (sync, chat, queue, polls, roles, signalling), backend-agnostic
+packages/room  the room logic itself (sync, chat, queue, polls, roles, relaying voice, cameras and the host stream), backend-agnostic
 packages/shared  message protocol (Zod), sync maths, link allowlist, subtitle parser
 scripts        smoke + real-browser e2e tests
 TASKS.md       task pipeline with honest status

@@ -110,6 +110,7 @@ export type ServerMsg =
       rate?: number;
       ch?: number;
       data?: string;
+      seq?: number;
     }
   | { t: 'room'; locked: boolean; hasPassword: boolean; repeat: RepeatMode }
   | { t: 'kicked'; reason: string }

@@ -8,6 +8,7 @@
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm --filter @wp/shared test",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:voice": "node scripts/smoke-voice.mjs",
     "deploy": "pnpm build && pnpm --filter @wp/worker deploy",
     "e2e:stream": "node scripts/e2e-stream.mjs",
     "e2e:link": "node scripts/e2e-link.mjs",

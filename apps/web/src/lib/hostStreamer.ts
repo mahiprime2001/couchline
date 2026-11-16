@@ -1,18 +1,21 @@
 /**
  * Host side of host-stream mode.
  *
- *   MediaStream -> MediaRecorder (1s WebM chunks) -> RTCDataChannel (one per viewer)
+ *   MediaStream -> MediaRecorder (1s WebM chunks) -> room server -> each viewer
  *
- * Nothing touches our server except the WebRTC handshake. A viewer can only start decoding at a
- * keyframe, and a plain WebM cluster boundary is not guaranteed to be one. So when someone joins
- * we start a fresh recording: its first chunk (WebM header + first cluster) always begins with a
- * keyframe. Viewers already watching append that new header seamlessly (see StreamReceiver).
+ * Every chunk goes up once, addressed to the viewers who are ready for it; the server passes it on. Nothing travels
+ * device to device, so it works on any network. A viewer can only start decoding at a keyframe, and a plain WebM
+ * cluster boundary is not guaranteed to be one. So when someone joins we start a fresh recording: its first chunk
+ * (WebM header + first cluster) always begins with a keyframe. Viewers already watching append that new header
+ * seamlessly (see StreamReceiver).
  */
+import { STREAM_PIECE } from '@wp/shared';
+import { sendBacklog, sendStreamPiece } from './room';
 
 const VIDEO_CODECS = ['vp8', 'vp9'];
-const PIECE = 15_000; // safe across browsers for SCTP messages
-const MAX_BACKLOG = 8_000_000; // bytes queued on one viewer before we drop them
 const MIN_BITRATE = 350_000;
+// our own upload is this far behind: skip a chunk (everyone restarts from the next fresh recording) and lower the bitrate
+const HOST_BACKLOG = 6_000_000;
 
 /**
  * Codec string for the stream. It must match the tracks that really exist: if we declare Opus audio
@@ -36,23 +39,18 @@ export interface ViewerStat {
   backlog: number;
 }
 
-interface Peer {
+interface Viewer {
   id: string;
-  pc: RTCPeerConnection;
-  dc: RTCDataChannel;
   ready: boolean;
-  /** connected, but waiting for the next fresh recording to start from a keyframe */
+  /** asked to watch, waiting for the next fresh recording to start from a keyframe */
   fresh: boolean;
   lag: number;
-  haveRemote: boolean;
-  pendingIce: RTCIceCandidateInit[];
 }
 
 export interface HostStreamerOptions {
   stream: MediaStream;
   codecs: string;
   bitrate: number;
-  iceServers: RTCIceServer[];
   maxViewers: number;
   signal: (to: string, data: unknown) => void;
   onStats: (stats: ViewerStat[]) => void;
@@ -61,7 +59,7 @@ export interface HostStreamerOptions {
 
 export class HostStreamer {
   private rec: MediaRecorder | null = null;
-  private peers = new Map<string, Peer>();
+  private viewers = new Map<string, Viewer>();
   private firstChunk = true;
   private restartPending = false;
   private lastRestart = 0;
@@ -71,6 +69,7 @@ export class HostStreamer {
   private overflows: number[] = [];
   private statsTimer: number | undefined;
   private bitrate: number;
+  private chunkNo = 0;
 
   constructor(private o: HostStreamerOptions) {
     this.bitrate = o.bitrate;
@@ -119,8 +118,20 @@ export class HostStreamer {
     } catch {
       /* ignore */
     }
-    for (const p of this.peers.values()) this.closePeer(p);
-    this.peers.clear();
+    this.viewers.clear();
+  }
+
+  /** Forgets viewers who left the room. */
+  keepOnly(ids: string[]): void {
+    const keep = new Set(ids);
+    let changed = false;
+    for (const id of [...this.viewers.keys()]) {
+      if (!keep.has(id)) {
+        this.viewers.delete(id);
+        changed = true;
+      }
+    }
+    if (changed) this.emitStats();
   }
 
   // ---------------------------------------------------------------- recorder
@@ -162,14 +173,32 @@ export class HostStreamer {
       // header + first cluster of a fresh recording: a safe place for waiting viewers to start
       this.firstChunk = false;
       this.restartPending = false;
-      for (const p of this.peers.values()) {
-        if (p.fresh) {
-          p.fresh = false;
-          p.ready = true;
+      for (const v of this.viewers.values()) {
+        if (v.fresh) {
+          v.fresh = false;
+          v.ready = true;
         }
       }
     }
-    for (const p of [...this.peers.values()]) if (p.ready) this.sendBlob(p, buf);
+    const ready = [...this.viewers.values()].filter((v) => v.ready);
+    if (ready.length > 0) {
+      if (sendBacklog() > HOST_BACKLOG) {
+        // our own connection cannot keep up: skip this chunk, start everyone again from a fresh recording, send less
+        for (const v of ready) {
+          v.ready = false;
+          v.fresh = true;
+        }
+        this.lowerBitrate();
+        this.requestFreshStart();
+      } else {
+        const ids = ready.map((v) => v.id);
+        const chunk = this.chunkNo++;
+        for (let i = 0; i < buf.length; i += STREAM_PIECE) {
+          const end = Math.min(i + STREAM_PIECE, buf.length);
+          sendStreamPiece(ids, buf.subarray(i, end), { chunk, first: i === 0, last: end >= buf.length });
+        }
+      }
+    }
     // a fresh recording started while the host is paused: it has now delivered its header + first
     // frame (so a late joiner can see the paused picture), so stop it until the host plays again
     if (this.paused && this.rec?.state === 'recording') {
@@ -191,26 +220,8 @@ export class HostStreamer {
     }, wait);
   }
 
-  private sendBlob(p: Peer, buf: Uint8Array): void {
-    const dc = p.dc;
-    if (dc.readyState !== 'open') return;
-    if (dc.bufferedAmount > MAX_BACKLOG) {
-      this.dropSlow(p);
-      return;
-    }
-    for (let i = 0; i < buf.length; i += PIECE) {
-      const part = buf.subarray(i, Math.min(i + PIECE, buf.length));
-      const out = new Uint8Array(part.length + 1);
-      out[0] = i + PIECE >= buf.length ? 1 : 0;
-      out.set(part, 1);
-      dc.send(out);
-    }
-  }
-
-  /** A viewer that cannot keep up gets dropped (they reconnect at the live edge); repeated drops lower the bitrate. */
-  private dropSlow(p: Peer): void {
-    this.closePeer(p);
-    this.peers.delete(p.id);
+  /** Falling behind twice within a minute lowers the bitrate. */
+  private lowerBitrate(): void {
     const now = Date.now();
     this.overflows = this.overflows.filter((t) => now - t < 60_000);
     this.overflows.push(now);
@@ -220,105 +231,49 @@ export class HostStreamer {
     }
   }
 
-  // ------------------------------------------------------------------ peers
+  // ------------------------------------------------------------------ viewers
 
-  async handleSignal(from: string, data: any): Promise<void> {
+  handleSignal(from: string, data: any): void {
     switch (data?.kind) {
       case 'stream-request':
-        if (!this.peers.has(from) && this.peers.size >= this.o.maxViewers) {
+        if (!this.viewers.has(from) && this.viewers.size >= this.o.maxViewers) {
           this.o.signal(from, { kind: 'stream-full' });
           return;
         }
-        await this.createPeer(from);
+        this.addViewer(from);
         return;
-      case 'stream-answer': {
-        const p = this.peers.get(from);
-        if (!p) return;
-        await p.pc.setRemoteDescription(data.sdp);
-        p.haveRemote = true;
-        for (const c of p.pendingIce.splice(0)) await p.pc.addIceCandidate(c).catch(() => undefined);
+      case 'stream-lag': {
+        const v = this.viewers.get(from);
+        if (v && Number.isFinite(data.v)) v.lag = data.v;
         return;
       }
-      case 'stream-ice': {
-        const p = this.peers.get(from);
-        if (!p || !data.candidate) return;
-        if (p.haveRemote) await p.pc.addIceCandidate(data.candidate).catch(() => undefined);
-        else p.pendingIce.push(data.candidate);
-        return;
-      }
-    }
-  }
-
-  private async createPeer(id: string): Promise<void> {
-    const prev = this.peers.get(id);
-    if (prev) {
-      this.closePeer(prev);
-      this.peers.delete(id);
-    }
-    const pc = new RTCPeerConnection({ iceServers: this.o.iceServers });
-    const dc = pc.createDataChannel('video', { ordered: true });
-    dc.binaryType = 'arraybuffer';
-    const peer: Peer = { id, pc, dc, ready: false, fresh: false, lag: 0, haveRemote: false, pendingIce: [] };
-    this.peers.set(id, peer);
-
-    pc.onicecandidate = (e) => {
-      if (e.candidate) this.o.signal(id, { kind: 'stream-ice', candidate: e.candidate.toJSON() });
-    };
-    pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'closed') this.removePeer(peer);
-    };
-    dc.onclose = () => this.removePeer(peer);
-    dc.onopen = () => {
-      dc.send(JSON.stringify({ t: 'hello', codecs: this.o.codecs }));
-      if (this.firstChunk) {
-        // a fresh recording is already pending (just started): its first chunk is our start point
-        peer.fresh = true;
-        this.restartPending = true;
-      } else {
-        peer.fresh = true;
+      case 'stream-slow': {
+        // the server could not keep up sending to them: they start again from the next fresh recording
+        const v = this.viewers.get(from);
+        if (!v) return;
+        v.ready = false;
+        v.fresh = true;
+        this.lowerBitrate();
         this.requestFreshStart();
+        return;
       }
-      this.emitStats();
-    };
-    dc.onmessage = (e) => {
-      if (typeof e.data !== 'string') return;
-      try {
-        const m = JSON.parse(e.data) as { t: string; v: number };
-        if (m.t === 'lag' && Number.isFinite(m.v)) peer.lag = m.v;
-      } catch {
-        /* ignore */
-      }
-    };
-
-    await pc.setLocalDescription(await pc.createOffer());
-    this.o.signal(id, { kind: 'stream-offer', sdp: pc.localDescription });
-  }
-
-  private removePeer(p: Peer): void {
-    if (this.peers.get(p.id) === p) {
-      this.peers.delete(p.id);
-      this.closePeer(p);
-      this.emitStats();
+      case 'stream-bye':
+        if (this.viewers.delete(from)) this.emitStats();
+        return;
     }
   }
 
-  private closePeer(p: Peer): void {
-    p.ready = false;
-    try {
-      p.dc.close();
-    } catch {
-      /* ignore */
-    }
-    try {
-      p.pc.close();
-    } catch {
-      /* ignore */
-    }
+  private addViewer(id: string): void {
+    this.viewers.set(id, { id, ready: false, fresh: true, lag: 0 });
+    this.o.signal(id, { kind: 'stream-hello', codecs: this.o.codecs });
+    // a fresh recording that has not sent its first chunk yet is their start point; otherwise start one
+    if (this.firstChunk) this.restartPending = true;
+    else this.requestFreshStart();
+    this.emitStats();
   }
 
   private emitStats(): void {
-    this.o.onStats(
-      [...this.peers.values()].filter((p) => p.ready).map((p) => ({ id: p.id, lag: p.lag, backlog: p.dc.bufferedAmount })),
-    );
+    const backlog = sendBacklog();
+    this.o.onStats([...this.viewers.values()].filter((v) => v.ready).map((v) => ({ id: v.id, lag: v.lag, backlog })));
   }
 }

@@ -108,6 +108,16 @@ await viewer.fill('input[placeholder="Your nickname"]', 'SitesViewer');
 await viewer.click('button:has-text("Join")');
 await viewer.waitForSelector('.chat-form input', { timeout: 10000 });
 
+// In a room of 3 or fewer, everyone controls playback. Two more people make it 4, so the viewer here is a plain
+// viewer and "make organizer" is what gives them control.
+for (const nick of ['Extra1', 'Extra2']) {
+  const extra = await (await browser.newContext()).newPage();
+  await extra.goto(roomUrl);
+  await extra.fill('input[placeholder="Your nickname"]', nick);
+  await extra.click('button:has-text("Join")');
+  await extra.waitForSelector('.room', { timeout: 10000 });
+}
+
 const tab = (page, name) => page.click(`.tabs button:has-text("${name}")`);
 const vtime = (page) => page.evaluate(() => document.querySelector('.video-area video')?.currentTime ?? -1);
 const paused = (page) => page.evaluate(() => document.querySelector('.video-area video')?.paused ?? null);

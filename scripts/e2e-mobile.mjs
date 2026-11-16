@@ -94,10 +94,12 @@ const st = () => viewer.evaluate(() => { const v = document.querySelector('video
 const hostT = () => host.evaluate(() => +document.querySelector('video').currentTime.toFixed(1));
 check('phone viewer is playing in sync with the host', !(await st()).paused && Math.abs((await st()).cur - (await hostT())) < 3);
 const seek = await viewer.locator('.seek').boundingBox();
+const beforeTap = await st();
 await viewer.touchscreen.tap(seek.x + seek.width * 0.15, seek.y + seek.height / 2);
 await sleep(1500);
 const afterTap = await st();
-check('tapping the seek bar with a finger rewinds', afterTap.cur < (await hostT()) - 3, JSON.stringify({ afterTap, host: await hostT() }));
+// in a room of 2 the phone viewer controls playback, so the host rewinds too: compare with where the phone was
+check('tapping the seek bar with a finger rewinds', afterTap.cur < beforeTap.cur - 3, JSON.stringify({ beforeTap, afterTap }));
 await viewer.tap('.controls button[aria-label="Pause"]');
 await sleep(600);
 check('tapping Pause pauses', (await st()).paused);

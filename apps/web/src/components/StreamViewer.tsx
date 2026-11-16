@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { clampSeek, type Cue } from '@wp/shared';
-import { getIceServers, onSeekRequest, onSignal, send, useRoom } from '../lib/room';
+import { onSeekRequest, onSignal, onStreamPiece, send, useRoom } from '../lib/room';
 import { StreamReceiver, type RecvStatus } from '../lib/streamReceiver';
 import { Controls, SubtitleOverlay, TapControls, useWake } from './Controls';
 import { useMediaSession, usePlayerShortcuts } from '../lib/shortcuts';
@@ -17,7 +17,8 @@ interface Props {
 export function StreamViewer({ onFullscreen }: Props) {
   const stream = useRoom((s) => s.stream);
   const hostId = useRoom((s) => s.members.find((m) => m.role === 'host')?.id ?? null);
-  const supported = typeof MediaSource !== 'undefined' && typeof RTCPeerConnection !== 'undefined';
+  // the stream arrives through the room server, so only playing WebM matters here
+  const supported = typeof MediaSource !== 'undefined';
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const recvRef = useRef<StreamReceiver | null>(null);
@@ -48,31 +49,24 @@ export function StreamViewer({ onFullscreen }: Props) {
   const [ready, setReady] = useState(false);
   const [tapShown, wakeTap] = useWake();
 
-  // create the receiver once ICE servers are known
+  // the receiver: setup messages from the host, and the stream's pieces relayed by the room server
   useEffect(() => {
     if (!supported || !videoRef.current) return;
-    let dead = false;
-    let recv: StreamReceiver | null = null;
-    void getIceServers().then((iceServers) => {
-      if (dead || !videoRef.current) return;
-      recv = new StreamReceiver({
-        video: videoRef.current,
-        iceServers,
-        signal: (to, data) => send({ t: 'signal', to, data }),
-        onStatus: setStatus,
-      });
-      recvRef.current = recv;
-      setReady(true);
+    const recv = new StreamReceiver({
+      video: videoRef.current,
+      signal: (to, data) => send({ t: 'signal', to, data }),
+      onStatus: setStatus,
     });
-    const off = onSignal((from, data) => {
-      if (typeof data?.kind === 'string' && data.kind.startsWith('stream-') && from === hostRef.current) {
-        void recvRef.current?.handleSignal(data);
-      }
+    recvRef.current = recv;
+    setReady(true);
+    const offSignal = onSignal((from, data) => {
+      if (typeof data?.kind === 'string' && data.kind.startsWith('stream-') && from === hostRef.current) recv.handleSignal(data);
     });
+    const offPiece = onStreamPiece((p) => recv.handlePiece(p));
     return () => {
-      dead = true;
-      off();
-      recv?.destroy();
+      offSignal();
+      offPiece();
+      recv.destroy();
       recvRef.current = null;
     };
   }, [supported]);

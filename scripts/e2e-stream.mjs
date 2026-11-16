@@ -1,4 +1,4 @@
-// Real-browser test of host-stream mode: host file -> MediaRecorder -> WebRTC data channel -> MSE -> rewind-only.
+// Real-browser test of host-stream mode: host file -> MediaRecorder -> room server -> MSE -> rewind-only.
 // Needs `pnpm dev` running (web on :5173, worker on :8787) and Chrome or Edge installed.
 //   node scripts/e2e-stream.mjs
 import { chromium } from 'playwright-core';
@@ -122,7 +122,7 @@ for (let i = 0; i < 40; i++) {
   if (s && s.end !== null && s.end > 3) break;
   await sleep(500);
 }
-check('viewer receives and buffers video over WebRTC', !!s && s.end > 3, JSON.stringify(s));
+check('viewer receives and buffers video through the room server', !!s && s.end > 3, JSON.stringify(s));
 if (!(s && s.end > 3)) {
   console.log('  viewer banner:', await viewer.locator('.overlay-msg').allTextContents());
   console.log('  viewer [stream] log:\n    ' + streamLogs.slice(0, 20).join('\n    '));

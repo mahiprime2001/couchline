@@ -89,6 +89,15 @@ for (const file of files) {
   await viewer.fill('input[placeholder="Your nickname"]', 'Watcher');
   await viewer.click('button:has-text("Join")');
   await viewer.waitForSelector('video', { timeout: 15000 });
+  // In a room of 3 or fewer, everyone controls playback. Two more people make it 4, so the viewer here is a plain
+  // viewer: rewinding moves only them, and they cannot go past the host.
+  for (const nick of ['Extra1', 'Extra2']) {
+    const extra = await page();
+    await extra.goto(room);
+    await extra.fill('input[placeholder="Your nickname"]', nick);
+    await extra.click('button:has-text("Join")');
+    await extra.waitForSelector('.room', { timeout: 15000 });
+  }
   await sleep(6000);
 
   const v1 = await state(viewer);
