@@ -11,6 +11,13 @@ interface Props {
 }
 
 /**
+ * How far behind the newest data a following viewer plays. The stream arrives in half-second chunks, plus network
+ * jitter: playing right at the edge runs out of picture before the next chunk lands, which shows as a short stop
+ * every second. A small cushion keeps playback continuous.
+ */
+const LIVE_DELAY = 2;
+
+/**
  * Viewer for a host-streamed video. The viewer can rewind inside whatever they have
  * buffered, but every seek is clamped to the live edge: they can never go forward of the host.
  */
@@ -31,6 +38,10 @@ export function StreamViewer({ onFullscreen }: Props) {
   const [stalled, setStalled] = useState(false);
   const [noAudio, setNoAudio] = useState(false);
   const [speed, setSpeed] = useState(1);
+  const speedRef = useRef(1);
+  speedRef.current = speed;
+  /** waiting for the cushion to fill before playing (at the start, and after the picture ran out) */
+  const fillingRef = useRef(true);
   const lastMove = useRef({ t: 0, at: Date.now() });
 
   const [status, setStatus] = useState<RecvStatus>('idle');
@@ -91,7 +102,7 @@ export function StreamViewer({ onFullscreen }: Props) {
       if (!r) return;
       if (v.currentTime > r.end + 0.25) v.currentTime = r.end;
       // any seek that lands well behind the edge (our slider, media keys, PiP...) means "I'm rewinding"
-      else if (r.end - v.currentTime > 2.6) {
+      else if (r.end - v.currentTime > LIVE_DELAY + 2.5) {
         attachedRef.current = false;
         setAttached(false);
       }
@@ -104,7 +115,7 @@ export function StreamViewer({ onFullscreen }: Props) {
       setPlaying(!v.paused);
       // playing but the picture is not moving for a while: say so instead of silently freezing
       if (Math.abs(v.currentTime - lastMove.current.t) > 0.05 || v.paused) lastMove.current = { t: v.currentTime, at: Date.now() };
-      setStalled(!v.paused && Date.now() - lastMove.current.at > 2500);
+      setStalled((!v.paused && Date.now() - lastMove.current.at > 2500) || fillingRef.current);
       setNoAudio(recvRef.current?.hasAudio() === false);
       if (!r) return;
       if (v.currentTime > r.end + 0.25) v.currentTime = r.end;
@@ -116,7 +127,23 @@ export function StreamViewer({ onFullscreen }: Props) {
           setAttached(true);
         }
       } else if (attachedRef.current) {
-        if (r.end - v.currentTime > 2.5) v.currentTime = Math.max(r.start, r.end - 0.4);
+        const behind = r.end - v.currentTime;
+        // Just started, or about to run out (the network stalled, the host just resumed): wait once until most of
+        // the cushion is there, instead of playing on an empty buffer and stopping again and again.
+        if (!fillingRef.current && behind < 0.25) fillingRef.current = true;
+        if (fillingRef.current && behind >= LIVE_DELAY * 0.8) fillingRef.current = false;
+        if (fillingRef.current) {
+          if (!v.paused) v.pause();
+          return;
+        }
+        if (behind > LIVE_DELAY + 6) {
+          // far behind (a long stall): jump back to the cushion
+          v.currentTime = Math.max(r.start, r.end - LIVE_DELAY);
+        } else if (speedRef.current === 1) {
+          // a little behind or ahead of the cushion: drift back gently instead of jumping (a jump skips picture)
+          const rate = behind > LIVE_DELAY + 1 ? 1.08 : behind < LIVE_DELAY - 1 ? 0.94 : 1;
+          if (v.playbackRate !== rate) v.playbackRate = rate;
+        }
         if (v.paused) {
           v.play()
             .then(() => setNeedTap(false))
@@ -166,12 +193,12 @@ export function StreamViewer({ onFullscreen }: Props) {
     if (!v || !range) return;
     const target = clampSeek(t, range.start, range.end);
     v.currentTime = target;
-    setAtt(range.end - target < 1.5);
+    setAtt(range.end - target < LIVE_DELAY + 1);
   };
   const goLive = () => {
     const v = videoRef.current;
     if (!v || !range) return;
-    v.currentTime = Math.max(range.start, range.end - 0.3);
+    v.currentTime = Math.max(range.start, range.end - LIVE_DELAY);
     v.playbackRate = 1; // back at the live edge means normal speed
     setSpeed(1);
     setAtt(true);

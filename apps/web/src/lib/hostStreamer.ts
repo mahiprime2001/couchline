@@ -1,7 +1,7 @@
 /**
  * Host side of host-stream mode.
  *
- *   MediaStream -> MediaRecorder (1s WebM chunks) -> room server -> each viewer
+ *   MediaStream -> MediaRecorder (half-second WebM chunks) -> room server -> each viewer
  *
  * Every chunk goes up once, addressed to the viewers who are ready for it; the server passes it on. Nothing travels
  * device to device, so it works on any network. A viewer can only start decoding at a keyframe, and a plain WebM
@@ -152,7 +152,8 @@ export class HostStreamer {
         this.onChunk(new Uint8Array(await blob.arrayBuffer()));
       });
     };
-    rec.start(1000);
+    // half-second chunks: data reaches viewers in a steady flow, so they need only a small cushion to never run dry
+    rec.start(500);
     this.rec = rec;
     // Note: a recorder pointed at a paused video emits nothing until frames flow again (verified in
     // Chrome, seeking does not help), so someone who joins during a pause sees the picture on resume.
