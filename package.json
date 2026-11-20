@@ -21,9 +21,15 @@
     "e2e:hosted": "node scripts/e2e-hosted.mjs",
     "e2e:player": "node scripts/e2e-player.mjs",
     "e2e:controls": "node scripts/e2e-controls.mjs",
+    "e2e:voice": "node scripts/e2e-voice.mjs",
     "setup-tools": "node scripts/setup-tools.mjs"
   },
   "devDependencies": {
     "playwright-core": "^1.65.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "node-datachannel"
+    ]
   }
 }

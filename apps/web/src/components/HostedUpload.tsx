@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { computePosition } from '@wp/shared';
+import { computePosition, isTorrentLink } from '@wp/shared';
 import { send, serverNow, useRoom } from '../lib/room';
 import { useToast } from '../lib/toast';
 import { useHostedFallback } from '../lib/hostedFallback';
@@ -154,14 +154,16 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
   /** yt-dlp downloads `url` on the server; `fromRoom` = it is the YouTube link already loaded in the room */
   const fetchLink = async (url: string, fromRoom: boolean) => {
     if (!url) return;
+    // a magnet link is long and unreadable: the job shows "Torrent" until the server knows the real name
+    const label = isTorrentLink(url) ? 'Torrent' : url;
     // if yt-dlp cannot get it, a link already in the room simply plays as a normal YouTube video
     const giveUp = (message: string) => {
       const room = useRoom.getState().sync;
       const site = fromRoom && room.url === url && room.kind === 'site';
-      fail(url, site ? `${message} Skipping it.` : fromRoom ? `${message} The normal YouTube version keeps playing.` : message);
+      fail(label, site ? `${message} Skipping it.` : fromRoom ? `${message} The normal YouTube version keeps playing.` : message);
       if (site) send({ t: 'queueNext' }); // nothing else can play a site link: move on instead of getting stuck
     };
-    setJob({ phase: 'downloading', name: url, pct: 0 });
+    setJob({ phase: 'downloading', name: label, pct: 0 });
     try {
       const r = await fetch(`/api/media/fetch?room=${encodeURIComponent(code)}`, {
         method: 'POST',
@@ -171,7 +173,7 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
       const body = (await r.json().catch(() => ({}))) as { id?: string; error?: string };
       if (!r.ok || !body.id) return giveUp(body.error ?? `Download failed (${r.status}).`);
       if (!fromRoom) onLinkUsed();
-      watchConversion(body.id, url, fromRoom ? url : null);
+      watchConversion(body.id, label, fromRoom ? url : null);
     } catch {
       giveUp('Could not reach the server.');
     }
@@ -184,7 +186,9 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
     if (sync.kind === 'hls' || sync.kind === 'file') autoUrl.current = '';
     // YouTube: only with the auto switch on. Any other page: always, it cannot play any other way.
     const site = sync.kind === 'site';
-    if ((!auto && !site) || !media?.ytdlp || busy) return;
+    // a torrent needs only ffmpeg on the server (no yt-dlp); anything else from a site needs yt-dlp
+    const ready = isTorrentLink(sync.url) ? media?.available : media?.ytdlp;
+    if ((!auto && !site) || !ready || busy) return;
     if (sync.mode !== 'link' || (sync.kind !== 'youtube' && !site) || sync.url === autoUrl.current) return;
     autoUrl.current = sync.url;
     if (site) send({ t: 'control', action: 'pause', position: 0 }); // the room waits at 0:00 until the copy is ready
@@ -232,15 +236,17 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
           if (f) upload(f);
         }}
       />
-      {media?.ytdlp && (
+      {media && (media.ytdlp || isTorrentLink(link)) && (
         <button
           type="button"
           className="chipbtn"
           disabled={busy || !link.trim()}
           title={
             link.trim()
-              ? 'Download this link with yt-dlp on your computer, then host it for everyone: quality and audio menus, no ads, and it works where embedding is blocked'
-              : 'Paste a link in the box first (YouTube and most video sites work)'
+              ? isTorrentLink(link)
+                ? 'Download this torrent on the server (the biggest video or audio file in it), then host it for everyone'
+                : 'Download this link with yt-dlp on your computer, then host it for everyone: quality and audio menus, no ads, and it works where embedding is blocked'
+              : 'Paste a link in the box first (YouTube, most video sites and torrents work)'
           }
           onClick={() => void fetchLink(link.trim(), false)}
         >

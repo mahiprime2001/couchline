@@ -86,6 +86,10 @@ describe('parseLink', () => {
     expect(parseLink('http://example.com/a.mp4').ok).toBe(false);
     expect(parseLink('https://some.example/page')).toMatchObject({ ok: true, kind: 'site' }); // checked by yt-dlp later
     expect(parseLink('javascript:alert(1)').ok).toBe(false);
+    expect(parseLink('magnet:?dn=no-hash')).toMatchObject({ ok: false });
+    const magnet = 'magnet:?xt=urn:btih:0123456789abcdef0123456789abcdef01234567&dn=film';
+    expect(parseLink(magnet)).toMatchObject({ ok: true, kind: 'site', url: magnet });
+    expect(parseLink('https://example.com/films/a.torrent')).toMatchObject({ ok: true, kind: 'site' });
     expect(parseLink('https://www.youtube.com/watch?v=short').ok).toBe(false);
   });
   it('allows http on localhost for testing', () => {

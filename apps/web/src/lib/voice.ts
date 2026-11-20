@@ -55,7 +55,15 @@ export interface VoiceOptions {
   onRemoteCam: (id: string, on: boolean) => void;
   /** Our own camera changed: the new track, or null when it is off (also when the phone stopped it and it could not come back). */
   onCamera?: (track: MediaStreamTrack | null) => void;
+  /** Someone's microphone went off (true) or on (false): a remote member's note, or our own mute / push-to-talk. */
+  onMicOff?: (id: string, off: boolean) => void;
+  /** Someone started (true) or stopped (false) talking, us included. */
+  onSpeaking?: (id: string, on: boolean) => void;
 }
+
+/** How loud counts as talking (RMS of the samples), and how long a short pause still counts as talking. */
+const TALK_LEVEL = 0.02;
+const TALK_HOLD_MS = 450;
 
 interface Remote {
   audioDec: AudioDecoder | null;
@@ -128,6 +136,11 @@ export class VoiceManager {
   private camCanvas: HTMLCanvasElement | null = null;
   private camTimer: number | undefined;
   private sweepTimer: number | undefined;
+  private stateTimer: number | undefined;
+  private talkTimer: number | undefined;
+  /** who is talking, and when each was last loud */
+  private talking = new Set<string>();
+  private loudAt = new Map<string, number>();
   private remotes = new Map<string, Remote>();
 
   constructor(private o: VoiceOptions) {}
@@ -153,12 +166,15 @@ export class VoiceManager {
     if (this.mic) await this.startAudio(this.mic);
     if (!this.active) return;
     if (this.cam) this.startVideo(this.cam);
-    send({ t: 'media', kind: 'cam', ts: 0, on: this.camOn });
+    window.clearInterval(this.stateTimer);
+    this.stateTimer = window.setInterval(() => this.sendState(), 5000);
   }
 
   /** Stops sending our microphone and camera. The others stay visible and audible. */
   leave(): void {
     this.active = false;
+    window.clearInterval(this.stateTimer);
+    this.setTalking(this.o.myId, false);
     this.stopVideoLoop();
     for (const n of this.micNodes) n.disconnect();
     this.micNodes = [];
@@ -181,6 +197,7 @@ export class VoiceManager {
     this.receiving = true;
     this.ctx ??= new AudioContext({ sampleRate: 48000, latencyHint: 'interactive' });
     this.sweepTimer = window.setInterval(() => this.sweep(), 1000);
+    this.talkTimer = window.setInterval(() => this.quietDown(), 150);
     const wake = () => void this.ctx?.resume().catch(() => undefined);
     this.wake = wake;
     document.addEventListener('pointerdown', wake);
@@ -192,6 +209,7 @@ export class VoiceManager {
     this.leave();
     this.receiving = false;
     window.clearInterval(this.sweepTimer);
+    window.clearInterval(this.talkTimer);
     if (this.wake) {
       document.removeEventListener('pointerdown', this.wake);
       document.removeEventListener('keydown', this.wake);
@@ -204,7 +222,24 @@ export class VoiceManager {
   }
 
   setMicEnabled(on: boolean): void {
+    if (this.micOn === on) return;
     this.micOn = on;
+    this.o.onMicOff?.(this.o.myId, !on);
+    if (!on) this.setTalking(this.o.myId, false);
+    if (this.active) send({ t: 'media', kind: 'mic', ts: 0, on });
+  }
+
+  /** Our camera and microphone state, for everyone. Repeated every few seconds, so a note that was missed catches up. */
+  private sendState(): void {
+    if (!this.active) return;
+    send({ t: 'media', kind: 'cam', ts: 0, on: this.camOn });
+    send({ t: 'media', kind: 'mic', ts: 0, on: this.micOn });
+  }
+
+  /** Just joined voice, or the connection came back: tell everyone our state, and send a key frame next. */
+  announce(): void {
+    this.sendState();
+    this.vForceKey = true;
   }
 
   /** Turn our camera on (asks the browser the first time) or off (stops sending it; the device stays open until you leave voice). */
@@ -283,6 +318,11 @@ export class VoiceManager {
       if (this.active) this.vForceKey = true;
       return;
     }
+    if (m.kind === 'mic') {
+      this.o.onMicOff?.(m.from, !m.on);
+      if (!m.on) this.setTalking(m.from, false);
+      return;
+    }
     if (m.kind !== 'cam') return;
     // an explicit on/off from them; a message sent before they joined voice can be dropped, so frames count too
     this.setRemoteCam(m.from, this.remoteOf(m.from), !!m.on);
@@ -336,6 +376,7 @@ export class VoiceManager {
   /** Collects the microphone's small blocks into 20 ms frames and encodes each one. */
   private onMicSamples(block: Float32Array, rate: number): void {
     if (!this.active) return;
+    if (this.micOn) this.noteLevel(this.o.myId, block);
     let at = 0;
     while (at < block.length) {
       const n = Math.min(block.length - at, AUDIO_FRAME - this.micFill);
@@ -492,6 +533,31 @@ export class VoiceManager {
     this.o.onRemoteCam(id, on);
   }
 
+  /** Marks `id` as talking when these samples are loud enough. */
+  private noteLevel(id: string, samples: Float32Array): void {
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) sum += samples[i]! * samples[i]!;
+    if (Math.sqrt(sum / Math.max(1, samples.length)) < TALK_LEVEL) return;
+    this.loudAt.set(id, performance.now());
+    this.setTalking(id, true);
+  }
+
+  private setTalking(id: string, on: boolean): void {
+    if (this.talking.has(id) === on) return;
+    if (on) this.talking.add(id);
+    else {
+      this.talking.delete(id);
+      this.loudAt.delete(id);
+    }
+    this.o.onSpeaking?.(id, on);
+  }
+
+  /** Someone who has been quiet for a moment is no longer talking. */
+  private quietDown(): void {
+    const now = performance.now();
+    for (const id of [...this.talking]) if (now - (this.loudAt.get(id) ?? 0) > TALK_HOLD_MS) this.setTalking(id, false);
+  }
+
   /** Frames stop when someone turns their camera off, so a camera with no frames for a moment counts as off. */
   private sweep(): void {
     const now = Date.now();
@@ -509,7 +575,7 @@ export class VoiceManager {
         /* already closed */
       }
       r.audioDec = new AudioDecoder({
-        output: (data) => this.schedule(r, data),
+        output: (data) => this.schedule(c.from, r, data),
         error: () => {
           r.audioDec = null;
         },
@@ -521,7 +587,7 @@ export class VoiceManager {
   }
 
   /** Plays one decoded piece of sound right after the previous one, with a small cushion against network jitter. */
-  private schedule(r: Remote, data: AudioData): void {
+  private schedule(id: string, r: Remote, data: AudioData): void {
     const ctx = this.ctx;
     if (!ctx) return data.close();
     const frames = data.numberOfFrames;
@@ -530,6 +596,7 @@ export class VoiceManager {
     for (let c = 0; c < data.numberOfChannels; c++) {
       data.copyTo(plane, { planeIndex: c, format: 'f32-planar' });
       buffer.copyToChannel(plane, c);
+      if (c === 0) this.noteLevel(id, plane);
     }
     data.close();
     const now = ctx.currentTime;
@@ -614,5 +681,7 @@ export class VoiceManager {
     }
     this.o.onRemoteVideo(id, null);
     this.o.onRemoteCam(id, false);
+    this.o.onMicOff?.(id, false);
+    this.setTalking(id, false);
   }
 }

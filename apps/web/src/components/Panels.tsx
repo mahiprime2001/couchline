@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from 'react';
 import QRCode from 'qrcode';
-import { REACTIONS, canControlPlayback, formatTime, parseLink, type Member, type QueueItem } from '@wp/shared';
+import { REACTIONS, canControlPlayback, formatTime, isTorrentLink, parseLink, type Member, type QueueItem } from '@wp/shared';
 import { requestSeek, send, useRoom } from '../lib/room';
 import { useToast } from '../lib/toast';
 import { checkLink, fetchYt, formatDuration, useGifSearch, looksLikeUrl, playlistIdOf, thumbUrl, useAutoplay, useYtdlp, watchUrl, youtubeIdOf, type YtEntry } from '../lib/ytlists';
@@ -314,7 +314,7 @@ export function QueuePanel() {
   const pending = queue.filter((q) => !q.approved);
   const approved = queue.filter((q) => q.approved);
   const label = (q: { title?: string; kind: string | null; videoId: string | null; url: string }) =>
-    q.title ?? (q.kind === 'youtube' ? `YouTube · ${q.videoId}` : q.kind === 'site' ? hostOf(q.url) : decodeURIComponent(q.url.split('?')[0]!.split('/').pop() ?? q.url));
+    q.title ?? (q.kind === 'youtube' ? `YouTube · ${q.videoId}` : q.kind === 'site' ? (isTorrentLink(q.url) ? 'Torrent' : hostOf(q.url)) : decodeURIComponent(q.url.split('?')[0]!.split('/').pop() ?? q.url));
   const nowId = youtubeIdOf(sync);
   const queued = new Set(queue.map((q) => q.videoId).filter((v): v is string => !!v));
   // oldest at the top, like a music app: what played, then what is playing, then what comes next
@@ -335,8 +335,8 @@ export function QueuePanel() {
     const list = yt ? playlistIdOf(text) : null;
     if (looksLikeUrl(text) && !list) {
       const parsed = parseLink(text);
-      if (parsed.ok && parsed.kind === 'site') {
-        // not YouTube or a video file: ask yt-dlp first, so a link it cannot play never reaches the queue
+      // not YouTube or a video file: ask yt-dlp first, so a link it cannot play never reaches the queue (torrents skip this)
+      if (parsed.ok && parsed.kind === 'site' && !isTorrentLink(text)) {
         if (!yt) return useToast.getState().show('This server has no yt-dlp, so only YouTube links and direct video files work.');
         setBusy(true);
         try {

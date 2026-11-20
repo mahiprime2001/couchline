@@ -3,8 +3,9 @@
 //   tools/yt-dlp/yt-dlp[.exe]           official standalone build (needs no Python); the server keeps it updated
 //   tools/cloudflared/cloudflared[.exe] for `pnpm tunnel` (share the room over https)
 // ffmpeg and ffprobe come from npm (ffmpeg-static, @ffprobe-installer/ffprobe) with `pnpm install`, so they are
-// not downloaded here. Anything already in tools/ is kept; pass --force to download again.
-//   pnpm setup-tools            pnpm setup-tools --force
+// not downloaded here. Anything already in tools/ is kept; pass --force to download again. A server that is already
+// public (see deploy/) needs no tunnel: --yt-dlp-only skips cloudflared.
+//   pnpm setup-tools            pnpm setup-tools --force            pnpm setup-tools --yt-dlp-only
 import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
@@ -13,6 +14,7 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const TOOLS = join(ROOT, 'tools');
 const force = process.argv.includes('--force');
+const ytdlpOnly = process.argv.includes('--yt-dlp-only');
 const { platform, arch } = process;
 const win = platform === 'win32';
 
@@ -65,5 +67,5 @@ async function get(name, asset, repo) {
 
 console.log(`Setting up tools for ${platform}-${arch} in ${TOOLS}`);
 await get('yt-dlp', YTDLP, 'yt-dlp/yt-dlp');
-await get('cloudflared', CLOUDFLARED, 'cloudflare/cloudflared');
+if (!ytdlpOnly) await get('cloudflared', CLOUDFLARED, 'cloudflare/cloudflared');
 console.log('Done. ffmpeg and ffprobe come with `pnpm install`. Start the app with `pnpm start` (or `pnpm dev`).');

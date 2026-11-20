@@ -40,8 +40,17 @@ function isPrivateHost(h: string): boolean {
   return h === 'localhost' || /^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h);
 }
 
-/** Allowlist: YouTube links and direct video files. Anything else is rejected. */
+/** A BitTorrent link: a magnet link with an info hash, or a .torrent file on an https address. */
+export function isTorrentLink(raw: string): boolean {
+  const s = raw.trim();
+  if (/^magnet:\?/i.test(s)) return /[?&]xt=urn:btih:/i.test(s);
+  return /^https:\/\/\S+\.torrent(\?\S*)?$/i.test(s);
+}
+
+/** Allowlist: YouTube links, direct video files and torrents. Anything else is rejected. */
 export function parseLink(raw: string): ParsedLink {
+  // a torrent is fetched by the host's page, like any other site link (see HostedUpload and media.ts)
+  if (isTorrentLink(raw)) return { ok: true, kind: 'site', url: raw.trim(), videoId: null };
   let u: URL;
   try {
     u = new URL(raw.trim());

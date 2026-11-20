@@ -204,6 +204,8 @@ export class RoomCore {
     if (++c.mediaCount > LIMITS.mediaFramesPerSec) return;
     if (kind === MEDIA_STREAM) return this.onStreamPiece(c, frame, now);
     if (!c.member.voice) return;
+    // muted by the host or an organizer: their sound goes nowhere (their camera still does)
+    if (kind === MEDIA_AUDIO && c.member.muted) return;
 
     const id = new TextEncoder().encode(c.member.id);
     const out = new Uint8Array(1 + id.length + frame.length);
@@ -779,9 +781,10 @@ export class RoomCore {
           return;
         }
         // camera on / off: a small note to everyone else (sound and pictures go as binary frames, see onMediaFrame)
-        if (msg.kind !== 'cam' || !c.member.voice) return;
+        // camera or microphone on / off: a small note to everyone else
+        if ((msg.kind !== 'cam' && msg.kind !== 'mic') || !c.member.voice) return;
         for (const x of this.conns.values()) {
-          if (x !== c) this.send(x, { t: 'media', from: c.member.id, kind: 'cam', ts: 0, on: msg.on });
+          if (x !== c) this.send(x, { t: 'media', from: c.member.id, kind: msg.kind, ts: 0, on: msg.on });
         }
         return;
       }

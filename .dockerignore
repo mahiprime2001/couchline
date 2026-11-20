@@ -1,0 +1,8 @@
+# everything the container builds or downloads for itself, and nothing from this machine
+**/node_modules
+**/dist
+tools
+.media
+apps/server/.media
+.git
+*.log

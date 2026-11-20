@@ -103,7 +103,7 @@ export type ServerMsg =
   | {
       t: 'media';
       from: string;
-      kind: 'audio' | 'video' | 'cam' | 'keyreq';
+      kind: 'audio' | 'video' | 'cam' | 'mic' | 'keyreq';
       ts: number;
       key?: boolean;
       on?: boolean;

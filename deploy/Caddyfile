@@ -1,0 +1,5 @@
+# https for Couchline: Caddy fetches the certificate for $DOMAIN by itself and passes everything on, WebSockets
+# (rooms, voice, cameras, host streams) included.
+{$DOMAIN} {
+	reverse_proxy couchline:8787
+}

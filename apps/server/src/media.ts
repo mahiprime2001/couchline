@@ -9,6 +9,8 @@ import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSyn
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import WebTorrent, { type Torrent, type TorrentFile } from 'webtorrent';
+import { isTorrentLink } from '@wp/shared';
 
 export type MediaState = 'uploading' | 'downloading' | 'queued' | 'converting' | 'done' | 'error';
 
@@ -37,7 +39,12 @@ interface Item {
   /** the link yt-dlp downloaded this from (null for uploads), and whether only the sound was fetched */
   source: string | null;
   audio: boolean;
+  /** stops a torrent download that is still running (yt-dlp uses `proc` instead) */
+  cancel: (() => void) | null;
 }
+
+/** the video and audio files a torrent may hold: only one of them is downloaded */
+const MEDIA_FILE = /\.(mp4|mkv|webm|mov|m4v|avi|flv|wmv|ts|m2ts|mp3|m4a|aac|flac|ogg|opus|wav)$/i;
 
 export interface MediaOptions {
   dir: string;
@@ -112,8 +119,10 @@ export function createMedia(opts: MediaOptions) {
   const queue: string[] = [];
   let running = false;
 
-  rmSync(opts.dir, { recursive: true, force: true }); // nothing survives a restart, by design
+  // nothing survives a restart, by design. Empty the folder rather than delete it: it can be a mounted volume (in
+  // Docker, for one), which cannot be removed.
   mkdirSync(opts.dir, { recursive: true });
+  for (const name of readdirSync(opts.dir)) rmSync(join(opts.dir, name), { recursive: true, force: true });
   const probeBin = spawnSync(opts.ffmpeg, ['-version'], { timeout: 10_000 });
   const available = !probeBin.error && probeBin.status === 0;
   // yt-dlp (Python) can take several seconds to answer, more while the computer is busy starting things. A
@@ -144,6 +153,7 @@ export function createMedia(opts: MediaOptions) {
       /* already gone */
     }
     if (item.timer) clearInterval(item.timer);
+    item.cancel?.();
     items.delete(id);
     rmSync(dirOf(id), { recursive: true, force: true });
   }
@@ -442,18 +452,30 @@ export function createMedia(opts: MediaOptions) {
       timer: null,
       source: null,
       audio: false,
+      cancel: null,
     };
     items.set(id, item);
     return item;
   }
 
+  // one BitTorrent client for every torrent, made on first use (it opens network sockets, so not at start-up)
+  let torrents: WebTorrent | null = null;
+  const torrentClient = (): WebTorrent => {
+    if (!torrents) {
+      torrents = new WebTorrent();
+      torrents.on('error', (err) => console.warn('[torrent]', err instanceof Error ? err.message : err));
+    }
+    return torrents;
+  };
+
   /**
    * POST /api/media/fetch?room=CODE   body {"url": "https://..."}   (header x-host-token)
    * Downloads the video with yt-dlp (best quality up to 1080p), then converts it exactly like an upload.
-   * Only a room's host can ask for it (this is meant for a private server: yt-dlp fetches whatever it is given).
+   * A torrent (magnet link or .torrent file) is downloaded with WebTorrent instead (see downloadTorrent).
+   * Only a room's host can ask for it (this is meant for a private server: yt-dlp and torrents fetch whatever they are given).
    */
   function fetchUrl(req: IncomingMessage, res: ServerResponse, url: URL): void {
-    if (!ytdlpAvailable()) return reject(req, res, 501, { error: 'yt-dlp (and ffmpeg) must be installed on the server for this.' });
+    if (!available) return reject(req, res, 501, { error: 'ffmpeg must be installed on the server for this.' });
     const room = (url.searchParams.get('room') ?? '').toUpperCase();
     const token = req.headers['x-host-token'];
     if (!/^[A-Z0-9]{4,10}$/.test(room) || !opts.isHost(room, typeof token === 'string' ? token : undefined)) {
@@ -475,7 +497,11 @@ export function createMedia(opts: MediaOptions) {
       } catch {
         /* not JSON: rejected just below */
       }
-      if (!/^https?:\/\/\S+$/i.test(link) || link.length > 2000) return send(res, 400, { error: 'Paste a full http(s) link to a video.' });
+      const torrent = isTorrentLink(link);
+      if ((!torrent && !/^https?:\/\/\S+$/i.test(link)) || link.length > 2000) {
+        return send(res, 400, { error: 'Paste a full http(s) link to a video, or a torrent link.' });
+      }
+      if (!torrent && !ytdlpAvailable()) return send(res, 501, { error: 'yt-dlp must be installed on the server for this.' });
       if (totalBytes() >= opts.maxTotalBytes) return send(res, 507, { error: 'The server is out of space for hosted videos. Try again later.' });
       // already fetched for this room (a preloaded next song, a replay, "previous"): hand back that copy at once
       const have = [...items.values()].find((i) => i.room === room && i.source === link && i.audio === audio && i.state !== 'error');
@@ -483,10 +509,12 @@ export function createMedia(opts: MediaOptions) {
         have.createdAt = Date.now(); // recently used: last in line to be dropped for space
         return send(res, 200, { id: have.id, reused: true });
       }
-      const item = makeItem(room, link.slice(0, 120), 'downloading', 0);
+      // a magnet link is unreadable as a name: a torrent shows "Torrent" until its real name is known (on metadata)
+      const item = makeItem(room, torrent ? 'Torrent' : link.slice(0, 120), 'downloading', 0);
       item.source = link;
       item.audio = audio;
-      download(item, link, audio);
+      if (torrent) downloadTorrent(item, link);
+      else download(item, link, audio);
       send(res, 200, { id: item.id });
     });
   }
@@ -538,19 +566,87 @@ export function createMedia(opts: MediaOptions) {
         item.error = `yt-dlp could not get this video. ${lines.filter((l) => l.startsWith('ERROR')).pop() ?? lines.pop() ?? ''}`.trim();
         return;
       }
-      renameSync(join(dir, file), join(dir, 'source'));
-      item.bytes = statSync(join(dir, 'source')).size;
-      if (totalBytes() > opts.maxTotalBytes) {
-        rmSync(join(dir, 'source'), { force: true });
-        item.bytes = 0;
-        item.state = 'error';
-        item.error = 'The server is out of space for hosted videos. Try again later.';
-        return;
-      }
-      item.progress = 0;
-      item.state = 'queued';
-      queue.push(item.id);
-      pump();
+      ready(item, join(dir, file));
+    });
+  }
+
+  /** A finished download (`file`, a path) becomes the item's source and waits its turn for conversion. */
+  function ready(item: Item, file: string): void {
+    const source = join(dirOf(item.id), 'source');
+    renameSync(file, source);
+    item.bytes = statSync(source).size;
+    if (totalBytes() > opts.maxTotalBytes) {
+      rmSync(source, { force: true });
+      item.bytes = 0;
+      item.state = 'error';
+      item.error = 'The server is out of space for hosted videos. Try again later.';
+      return;
+    }
+    item.progress = 0;
+    item.state = 'queued';
+    queue.push(item.id);
+    pump();
+  }
+
+  /**
+   * A torrent (magnet link or .torrent file). Only the biggest video or audio file in it is downloaded; the rest
+   * are skipped. Like yt-dlp, the finished file is converted afterwards, so playback starts once it is complete.
+   * Nobody sharing it for 2 minutes is an error, so a dead torrent does not wait forever.
+   */
+  function downloadTorrent(item: Item, link: string): void {
+    const folder = join(dirOf(item.id), 'torrent');
+    let torrent: Torrent;
+    try {
+      torrent = torrentClient().add(link, { path: folder });
+    } catch (e) {
+      item.state = 'error';
+      item.error = `That torrent link could not be read. ${(e as Error).message}`;
+      return;
+    }
+    let gotInfo = false;
+    let wanted: TorrentFile | null = null;
+    const fail = (message: string): void => {
+      clearTimeout(noPeers);
+      item.cancel = null;
+      torrent.destroy();
+      if (!items.has(item.id)) return; // removed while downloading
+      item.state = 'error';
+      item.error = message;
+    };
+    const noPeers = setTimeout(() => {
+      if (!gotInfo) fail('Nobody is sharing this torrent right now (no peers answered in 2 minutes).');
+    }, 120_000);
+    item.cancel = () => {
+      clearTimeout(noPeers);
+      torrent.destroy();
+    };
+    torrent.on('error', (err) => fail(`The torrent could not be downloaded. ${err instanceof Error ? err.message : String(err)}`));
+    torrent.once('metadata', () => {
+      gotInfo = true;
+      clearTimeout(noPeers);
+      const media = torrent.files.filter((f) => MEDIA_FILE.test(f.name)).sort((a, b) => b.length - a.length)[0];
+      if (!media) return fail('This torrent has no video or audio file in it.');
+      if (media.length > opts.maxBytes) return fail(`This file is larger than the server's limit (${Math.round(opts.maxBytes / 1024 / 1024)} MB).`);
+      if (totalBytes() + media.length > opts.maxTotalBytes) return fail('The server is out of space for hosted videos. Try again later.');
+      wanted = media;
+      for (const f of torrent.files) if (f !== media) f.deselect();
+      item.name = torrent.name.slice(0, 120);
+      item.bytes = media.length;
+    });
+    torrent.on('download', () => {
+      item.progress = torrent.progress;
+    });
+    torrent.once('done', () => {
+      if (!wanted || !items.has(item.id)) return;
+      const file = join(folder, wanted.path);
+      item.cancel = null;
+      clearTimeout(noPeers);
+      // stop sharing and close the file before it is moved; the folder is only needed until then
+      torrent.destroy({}, () => {
+        if (!items.has(item.id)) return; // removed while closing
+        ready(item, file);
+        rmSync(folder, { recursive: true, force: true });
+      });
     });
   }
 

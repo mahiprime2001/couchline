@@ -2,7 +2,7 @@
 
 Watch videos together in a room, like a Discord channel. No accounts, no database, nothing stored.
 
-- **Link mode:** paste a YouTube link (or a direct .mp4/.webm/.mov link). Everyone stays in sync.
+- **Link mode:** paste a YouTube link (or a direct .mp4/.webm/.mov link). Everyone stays in sync. A magnet link or `.torrent` link works too: only the host can add one, and the server downloads the biggest video or audio file in the torrent, then hosts it like an upload. Torrents need ffmpeg on the server, not yt-dlp.
 - **Host stream:** the host plays a file from their own computer (or shares a tab/screen) and it streams live through the room server to the viewers. Nothing is stored on the server.
 - **Live, rewind-only:** viewers can go back, never ahead of the host. A "Go live" button jumps back.
 - **Voice and cameras:** encoded in the browser and passed on by the room server, so they work on any network. Everyone in the room sees and hears the people in voice; joining voice is only needed to send your own microphone and camera.
@@ -68,6 +68,7 @@ pnpm typecheck
 pnpm smoke        # WebSocket protocol checks; needs `pnpm dev` running
 pnpm smoke:voice  # voice, camera and host-stream relay checks (binary frames); needs `pnpm dev` running
 pnpm e2e          # real Chrome: link mode + host-stream mode; needs `pnpm dev` and Chrome/Edge installed
+pnpm e2e:voice    # real Chrome with a fake mic/camera: listening, speaking outline, mute badges, reconnecting
 ```
 
 ## Room lifetime
@@ -88,7 +89,25 @@ pnpm e2e          # real Chrome: link mode + host-stream mode; needs `pnpm dev` 
 
 ## Deploy (when you're ready)
 
-**Option A: any machine or VPS (Node 20+), one process.** It serves the web app and the rooms backend together:
+**Recommended: a server of your own, with Docker and automatic https.** Any small Linux server (a cloud VPS) works. Everything runs there, so friends join from any network with a fixed address, and rooms keep going when your own computer sleeps.
+
+1. Rent a small Linux server and install Docker on it (most providers offer a ready image with Docker).
+2. Point a domain or subdomain at the server's public IP (an `A` record, e.g. `watch.example.com`).
+3. Open ports 80 and 443 in the server's firewall.
+4. On the server:
+
+   ```bash
+   git clone https://github.com/<you>/couchline.git && cd couchline/deploy
+   DOMAIN=watch.example.com docker compose up -d --build
+   ```
+
+5. Open `https://watch.example.com`. Caddy fetches and renews the https certificate by itself.
+
+To update later: `git pull && DOMAIN=watch.example.com docker compose up -d --build` (this restarts the server, which closes open rooms). Uploaded and downloaded videos are kept in a Docker volume for `MEDIA_TTL_HOURS` (6 by default) and then removed.
+
+The server's **upload bandwidth** decides how many people a call or stream can hold: each camera, microphone and host stream goes to every person in the room from the server. As a rough guide, a camera is up to about 0.45 Mbps per viewer and a host stream 0.8 to 2.5 Mbps per viewer.
+
+**Option A: any machine or VPS (Node 20+), one process, without Docker.** It serves the web app and the rooms backend together:
 
 ```bash
 pnpm install
@@ -105,6 +124,8 @@ pnpm deploy       # builds the web app, deploys the Worker + Durable Object + st
 ```
 
 No TURN or other relay service is needed: voice, cameras and the host stream all go through the room backend itself.
+
+The Cloudflare backend runs the same room code and passes the same protocol, voice and stream tests, with two differences: there is no ffmpeg or yt-dlp (no uploads, conversions or site links), and Cloudflare's sockets do not report a backlog, so a viewer on a slow connection is not detected and skipped as it is on the Node server. Cloudflare also counts WebSocket messages for billing, and voice sends dozens per second per person, so check its Durable Objects pricing before using it for long calls.
 
 ## Layout
 

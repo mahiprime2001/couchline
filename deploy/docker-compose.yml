@@ -1,0 +1,35 @@
+# Couchline on a public server, with automatic https (Caddy gets and renews a free Let's Encrypt certificate).
+# On the server, with a domain pointing at it:
+#   cd deploy
+#   DOMAIN=watch.example.com docker compose up -d --build
+# Ports 80 and 443 must be open. Rooms live in memory: restarting the couchline container closes every room.
+services:
+  couchline:
+    build: ..
+    restart: unless-stopped
+    environment:
+      MEDIA_DIR: /data/media
+      # optional: GIF search in chat (a free key from GIPHY or Tenor)
+      GIPHY_KEY: ${GIPHY_KEY:-}
+      TENOR_KEY: ${TENOR_KEY:-}
+    volumes:
+      - media:/data/media
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on: [couchline]
+    ports:
+      - '80:80'
+      - '443:443'
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN to the address people will open, e.g. watch.example.com}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  media:
+  caddy_data:
+  caddy_config:

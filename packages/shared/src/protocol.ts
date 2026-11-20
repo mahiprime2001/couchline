@@ -116,7 +116,7 @@ export const ClientMsg = z.discriminatedUnion('t', [
   // voice and camera, encoded in the browser and relayed by the server to the other people in voice
   z.object({
     t: z.literal('media'),
-    kind: z.enum(['audio', 'video', 'cam', 'keyreq']),
+    kind: z.enum(['audio', 'video', 'cam', 'mic', 'keyreq']),
     ts: z.number().int().min(0).max(1e15),
     key: z.boolean().optional(),
     on: z.boolean().optional(),

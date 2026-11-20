@@ -9,7 +9,7 @@ import { ReactionBar, ReactionLayer } from './Reactions';
 import { VoiceBar } from './VoiceBar';
 import { CallGrid } from './CallGrid';
 import { checkLink, useAutoplaySuggestions, useServerOutdated, useYtdlp } from '../lib/ytlists';
-import { canControlPlayback, parseLink } from '@wp/shared';
+import { canControlPlayback, isTorrentLink, parseLink } from '@wp/shared';
 import { useToast } from '../lib/toast';
 import type { ChatMsg } from '@wp/shared';
 
@@ -59,7 +59,8 @@ export function RoomPage({ code, navigate }: { code: string; navigate: (p: strin
   // shows in a pop-up when it cannot be played
   const playForEveryone = async (raw: string) => {
     const p = parseLink(raw);
-    if (!p.ok || p.kind !== 'site') return send({ t: 'load', url: raw });
+    // a torrent needs no yt-dlp check: the host's page downloads it on the server (see HostedUpload)
+    if (!p.ok || p.kind !== 'site' || isTorrentLink(raw)) return send({ t: 'load', url: raw });
     if (!ytOnServer) return useToast.getState().show('This server has no yt-dlp, so only YouTube links and direct video files work.');
     setChecking(true);
     try {

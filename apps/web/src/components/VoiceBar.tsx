@@ -37,6 +37,8 @@ export function VoiceBar() {
         setCamOn(track !== null);
         useCall.getState().setCamera(track);
       },
+      onMicOff: (id, off) => useCall.getState().setMicOff(id, off),
+      onSpeaking: (id, on) => useCall.getState().setSpeaking(id, on),
     });
     mgr.listen();
     mgrRef.current = mgr;
@@ -56,14 +58,34 @@ export function VoiceBar() {
     mgrRef.current?.reconcile(voiceIds);
   }, [myId, voiceIds.join(',')]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // mic gating: muted, or push-to-talk (hold V)
+  // The connection dropped and came back: the server rejoined us with voice off, while this page still shows us in
+  // voice. Tell it again, with our camera and microphone state, so the others hear and see us without a re-join.
+  const status = useRoom((s) => s.status);
+  const lastStatus = useRef(status);
+  const inVoiceRef = useRef(false);
+  inVoiceRef.current = inVoice;
+  useEffect(() => {
+    const before = lastStatus.current;
+    lastStatus.current = status;
+    if (status === 'joined' && before !== 'joined' && inVoiceRef.current) {
+      send({ t: 'voice', on: true });
+      mgrRef.current?.announce();
+    }
+  }, [status]);
+
+  // muted by the host or an organizer: our sound is dropped by the server anyway, so do not send it at all
+  const orgMuted = !!me?.muted;
+  const orgMutedRef = useRef(false);
+  orgMutedRef.current = orgMuted;
+
+  // mic gating: muted (by us or an organizer), or push-to-talk (hold V)
   useEffect(() => {
     if (!inVoice) return;
-    mgrRef.current?.setMicEnabled(!muted && !ptt);
+    mgrRef.current?.setMicEnabled(!muted && !ptt && !orgMuted);
     if (!ptt) return;
     const typing = (e: KeyboardEvent) => ['INPUT', 'TEXTAREA'].includes((e.target as HTMLElement).tagName);
     const down = (e: KeyboardEvent) => {
-      if (e.key.toLowerCase() === 'v' && !typing(e) && !mutedRef.current) mgrRef.current?.setMicEnabled(true);
+      if (e.key.toLowerCase() === 'v' && !typing(e) && !mutedRef.current && !orgMutedRef.current) mgrRef.current?.setMicEnabled(true);
     };
     const up = (e: KeyboardEvent) => {
       if (e.key.toLowerCase() === 'v') mgrRef.current?.setMicEnabled(false);
@@ -74,7 +96,7 @@ export function VoiceBar() {
       window.removeEventListener('keydown', down);
       window.removeEventListener('keyup', up);
     };
-  }, [inVoice, muted, ptt]);
+  }, [inVoice, muted, ptt, orgMuted]);
 
   const join = async () => {
     const mgr = mgrRef.current;
@@ -90,6 +112,8 @@ export function VoiceBar() {
       setInVoice(true);
       useCall.getState().setInVoice(true);
       send({ t: 'voice', on: true });
+      // now that the server knows we are in voice, our camera and microphone notes are passed on
+      mgr.announce();
     } catch (e) {
       // a browser without voice support says so; a refused microphone gets the plain message
       const err = e as Error;
@@ -130,9 +154,15 @@ export function VoiceBar() {
         <button onClick={join}>🎙️ Join voice{voiceIds.length > 0 ? ` (${voiceIds.length})` : ''}</button>
       ) : (
         <>
-          <button className={muted ? 'danger' : 'primary'} onClick={() => setMuted((m) => !m)}>
-            {muted ? '🔇 Muted' : '🎙️ Live'}
-          </button>
+          {orgMuted ? (
+            <button className="danger" disabled title="The host or an organizer muted you. They can unmute you from the People tab.">
+              🔇 Muted by an organizer
+            </button>
+          ) : (
+            <button className={muted ? 'danger' : 'primary'} onClick={() => setMuted((m) => !m)}>
+              {muted ? '🔇 Muted' : '🎙️ Live'}
+            </button>
+          )}
           <button className={camOn ? 'primary' : ''} onClick={toggleCamera} title={camOn ? 'Turn your camera off' : 'Show your camera to the room'}>
             {camOn ? '📷 Camera on' : '📷 Camera off'}
           </button>

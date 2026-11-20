@@ -19,6 +19,15 @@ export class Room implements DurableObject {
     const client = pair[0];
     const server = pair[1];
     server.accept();
+    // Answer a closing browser at once. Without the reply the browser waits before it reports the close, so a page
+    // whose connection dropped is slow to notice, and slow to reconnect (voice included).
+    server.addEventListener('close', () => {
+      try {
+        server.close(1000, 'bye');
+      } catch {
+        /* already closed */
+      }
+    });
     this.core.attach(server as unknown as WebSocketLike);
     return new Response(null, { status: 101, webSocket: client });
   }
