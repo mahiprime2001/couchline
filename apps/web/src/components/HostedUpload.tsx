@@ -3,13 +3,26 @@ import { computePosition, isTorrentLink } from '@wp/shared';
 import { send, serverNow, useRoom } from '../lib/room';
 import { useToast } from '../lib/toast';
 import { useHostedFallback } from '../lib/hostedFallback';
+import { useLinkStatus } from '../lib/linkStatus';
 
 type Job =
   | { phase: 'uploading'; name: string; pct: number }
-  | { phase: 'downloading'; name: string; pct: number }
-  | { phase: 'converting'; name: string; pct: number }
+  | { phase: 'downloading'; name: string; pct: number; detail?: string }
+  | { phase: 'converting'; name: string; pct: number; detail?: string }
   | { phase: 'playing'; name: string; pct: number; done: boolean }
   | { phase: 'error'; name: string; message: string };
+
+const fmtRate = (bytesPerSec: number): string =>
+  bytesPerSec >= 1024 * 1024 ? `${(bytesPerSec / (1024 * 1024)).toFixed(1)} MB/s` : `${Math.round(bytesPerSec / 1024)} KB/s`;
+
+/** "4 peers · 812 KB/s", or "looking for peers…" before the first one answers; the conversion speed while converting */
+const detailOf = (st: { state: string; progress: number; peers?: number; rate?: number; speed?: string | null }): string => {
+  const parts: string[] = [];
+  if (st.peers !== undefined) parts.push(st.peers === 0 && st.progress === 0 ? 'looking for peers…' : `${st.peers} peer${st.peers === 1 ? '' : 's'}`);
+  if (st.rate) parts.push(fmtRate(st.rate));
+  if (st.state === 'converting' && st.speed) parts.push(`converting at ${st.speed}x`);
+  return parts.join(' · ');
+};
 
 interface Props {
   /** the link in the room's link box, for "Download & host" (yt-dlp) */
@@ -72,7 +85,18 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
       try {
         const r = await fetch(`/api/media/${id}`);
         if (!r.ok) return fail(name, 'The server lost this video (it may have expired). Try again.');
-        const st = (await r.json()) as { state: string; progress: number; playable: boolean; entry?: string; name?: string; duration?: number; error: string | null };
+        const st = (await r.json()) as {
+          state: string;
+          progress: number;
+          playable: boolean;
+          entry?: string;
+          name?: string;
+          duration?: number;
+          error: string | null;
+          peers?: number;
+          rate?: number;
+          speed?: string | null;
+        };
         const shown = st.name || name; // yt-dlp reports the real title once it knows it
         if (st.state === 'error') {
           // a YouTube link the room is already playing simply carries on as a normal YouTube video
@@ -81,7 +105,7 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
           if (fallback && now.kind === 'site') send({ t: 'queueNext' }); // a site link cannot play any other way
           return fail(shown, `${st.error ?? 'Conversion failed.'}${fallback ? (now.kind === 'site' ? ' Skipping it.' : ' The normal YouTube version keeps playing.') : ''}`);
         }
-        if (st.state === 'downloading') return setJob({ phase: 'downloading', name: shown, pct: st.progress });
+        if (st.state === 'downloading') return setJob({ phase: 'downloading', name: shown, pct: st.progress, detail: detailOf(st) });
         // Taking over a YouTube video that is already playing: wait until the copy is converted a bit past the
         // room's current moment, then switch to it right there (no restart from 0:00).
         const room = useRoom.getState().sync;
@@ -108,7 +132,7 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
           }
         }
         if (loaded) setJob({ phase: 'playing', name: shown, pct: st.progress, done: st.state === 'done' });
-        else setJob({ phase: 'converting', name: shown, pct: st.progress });
+        else setJob({ phase: 'converting', name: shown, pct: st.progress, detail: detailOf(st) });
         if (st.state === 'done') window.clearInterval(pollRef.current);
       } catch {
         /* a missed poll is fine, the next one retries */
@@ -207,6 +231,19 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
       body: JSON.stringify({ url: nextUp, audio: true }),
     }).catch(() => preloaded.current.delete(nextUp));
   }, [auto, music, media, nextUp, sync.kind, code]);
+  // the player shows what is happening while a link loads (the viewers see it on the picture, not only here)
+  useEffect(() => {
+    const text =
+      !job || job.phase === 'playing' || job.phase === 'uploading'
+        ? null
+        : job.phase === 'error'
+          ? job.message
+          : job.phase === 'downloading'
+            ? `Loading from the internet: ${Math.round(job.pct * 100)}%${job.detail ? ` · ${job.detail}` : ''}`
+            : `Preparing the video for everyone: ${Math.round(job.pct * 100)}%${job.detail ? ` · ${job.detail}` : ''}`;
+    useLinkStatus.setState({ text });
+  }, [job]);
+  useEffect(() => () => useLinkStatus.setState({ text: null }), []);
   const unavailable = media !== null && !media.available;
   const pct = (n: number) => `${Math.round(n * 100)}%`;
 
@@ -308,12 +345,14 @@ export function HostedUpload({ link, onLinkUsed }: Props) {
           )}
           {job.phase === 'downloading' && (
             <>
-              ⬇️ Downloading <b>{job.name}</b> {pct(job.pct)} <progress value={job.pct} max={1} />
+              ⬇️ Downloading <b>{job.name}</b> {pct(job.pct)} <progress value={job.pct} max={1} />{' '}
+              {job.detail && <span className="muted">{job.detail}</span>}
             </>
           )}
           {job.phase === 'converting' && (
             <>
-              ⚙️ Converting <b>{job.name}</b> {pct(job.pct)} <progress value={job.pct} max={1} />
+              ⚙️ Converting <b>{job.name}</b> {pct(job.pct)} <progress value={job.pct} max={1} />{' '}
+              {job.detail && <span className="muted">{job.detail}</span>}
             </>
           )}
           {job.phase === 'playing' && (

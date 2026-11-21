@@ -41,6 +41,11 @@ interface Item {
   audio: boolean;
   /** stops a torrent download that is still running (yt-dlp uses `proc` instead) */
   cancel: (() => void) | null;
+  /** torrent: peers connected now, and download speed in bytes per second */
+  peers: number;
+  rate: number;
+  /** ffmpeg's conversion speed, as a multiple of real time ("1.2" = 1.2x), while converting */
+  ffSpeed: string | null;
 }
 
 /** the video and audio files a torrent may hold: only one of them is downloaded */
@@ -283,6 +288,51 @@ export function createMedia(opts: MediaOptions) {
     return out;
   }
 
+  /** Runs ffmpeg in `dir` and keeps the item's playlists current until it exits. */
+  function runFfmpeg(item: Item, args: string[], dir: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      const proc = spawn(opts.ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd: dir });
+      item.proc = proc;
+      item.timer = setInterval(() => refreshLists(item), 400);
+      let errTail = '';
+      proc.stderr.on('data', (d: Buffer) => {
+        errTail = (errTail + d.toString()).slice(-600);
+      });
+      proc.stdout.on('data', (d: Buffer) => {
+        const m = d.toString().match(/out_time_us=(\d+)/g);
+        const last = m?.[m.length - 1]?.split('=')[1];
+        if (last && item.duration > 0) item.progress = Math.min(1, Number(last) / 1e6 / item.duration);
+        const speed = [...d.toString().matchAll(/speed=\s*([\d.]+)x/g)].pop();
+        if (speed) item.ffSpeed = speed[1]!;
+      });
+      proc.on('error', () => {
+        item.state = 'error';
+        item.error = 'ffmpeg could not be started on the server.';
+        resolve();
+      });
+      proc.on('close', (code) => {
+        item.proc = null;
+        // ffmpeg can finish "successfully" while complaining (for example a playlist it could not rewrite)
+        if (errTail.trim()) console.warn(`[media ${item.id.slice(0, 8)}] ffmpeg exit ${code}:`, errTail.trim().slice(-400));
+        if (item.timer) clearInterval(item.timer);
+        item.timer = null;
+        if (!items.has(item.id)) return resolve(); // removed while converting
+        if (item.state === 'error') return resolve(); // already failed for another reason (the torrent), keep that message
+        refreshLists(item);
+        if (code === 0) repairPlaylists(item);
+        if (code === 0) {
+          item.state = 'done';
+          item.progress = 1;
+          rmSync(join(dir, 'source'), { force: true }); // the original is no longer needed
+        } else {
+          item.state = 'error';
+          item.error = `Conversion failed. ${errTail.trim().split('\n').slice(-2).join(' ')}`.trim();
+        }
+        resolve();
+      });
+    });
+  }
+
   async function convert(item: Item): Promise<void> {
     item.state = 'converting';
     const dir = dirOf(item.id);
@@ -376,44 +426,7 @@ export function createMedia(opts: MediaOptions) {
       args.push('-master_pl_name', 'master.m3u8', '-hls_segment_filename', 'seg_%v_%05d.ts', '-var_stream_map', entries.join(' '), 'stream_%v.m3u8');
     }
 
-    await new Promise<void>((resolve) => {
-      const proc = spawn(opts.ffmpeg, args, { stdio: ['ignore', 'pipe', 'pipe'], cwd: dir });
-      item.proc = proc;
-      item.timer = setInterval(() => refreshLists(item), 400);
-      let errTail = '';
-      proc.stderr.on('data', (d: Buffer) => {
-        errTail = (errTail + d.toString()).slice(-600);
-      });
-      proc.stdout.on('data', (d: Buffer) => {
-        const m = d.toString().match(/out_time_us=(\d+)/g);
-        const last = m?.[m.length - 1]?.split('=')[1];
-        if (last && item.duration > 0) item.progress = Math.min(1, Number(last) / 1e6 / item.duration);
-      });
-      proc.on('error', () => {
-        item.state = 'error';
-        item.error = 'ffmpeg could not be started on the server.';
-        resolve();
-      });
-      proc.on('close', (code) => {
-        item.proc = null;
-        // ffmpeg can finish "successfully" while complaining (for example a playlist it could not rewrite)
-        if (errTail.trim()) console.warn(`[media ${item.id.slice(0, 8)}] ffmpeg exit ${code}:`, errTail.trim().slice(-400));
-        if (item.timer) clearInterval(item.timer);
-        item.timer = null;
-        if (!items.has(item.id)) return resolve(); // removed while converting
-        refreshLists(item);
-        if (code === 0) repairPlaylists(item);
-        if (code === 0) {
-          item.state = 'done';
-          item.progress = 1;
-          rmSync(src, { force: true }); // the original is no longer needed
-        } else {
-          item.state = 'error';
-          item.error = `Conversion failed. ${errTail.trim().split('\n').slice(-2).join(' ')}`.trim();
-        }
-        resolve();
-      });
-    });
+    await runFfmpeg(item, args, dir);
   }
 
   function pump(): void {
@@ -453,6 +466,9 @@ export function createMedia(opts: MediaOptions) {
       source: null,
       audio: false,
       cancel: null,
+      peers: 0,
+      rate: 0,
+      ffSpeed: null,
     };
     items.set(id, item);
     return item;
@@ -607,6 +623,7 @@ export function createMedia(opts: MediaOptions) {
     let wanted: TorrentFile | null = null;
     const fail = (message: string): void => {
       clearTimeout(noPeers);
+      clearInterval(monitor);
       item.cancel = null;
       torrent.destroy();
       if (!items.has(item.id)) return; // removed while downloading
@@ -618,8 +635,17 @@ export function createMedia(opts: MediaOptions) {
     }, 120_000);
     item.cancel = () => {
       clearTimeout(noPeers);
+      clearInterval(monitor);
       torrent.destroy();
     };
+    // once a second: the peers and speed the page shows; and a log line every 5 seconds, for finding slow downloads
+    let ticks = 0;
+    const monitor = setInterval(() => {
+      item.peers = torrent.numPeers;
+      item.rate = torrent.downloadSpeed;
+      if (++ticks % 5 !== 0) return;
+      console.log(`[torrent ${item.id.slice(0, 8)}] ${Math.round(torrent.progress * 100)}% · ${torrent.numPeers} peers · ${Math.round(torrent.downloadSpeed / 1024)} KB/s`);
+    }, 1000);
     torrent.on('error', (err) => fail(`The torrent could not be downloaded. ${err instanceof Error ? err.message : String(err)}`));
     torrent.once('metadata', () => {
       gotInfo = true;
@@ -641,6 +667,7 @@ export function createMedia(opts: MediaOptions) {
       const file = join(folder, wanted.path);
       item.cancel = null;
       clearTimeout(noPeers);
+      clearInterval(monitor);
       // stop sharing and close the file before it is moved; the folder is only needed until then
       torrent.destroy({}, () => {
         if (!items.has(item.id)) return; // removed while closing
@@ -719,6 +746,10 @@ export function createMedia(opts: MediaOptions) {
       duration: item.duration,
       name: item.name,
       error: item.error,
+      // torrents: how many peers are connected, the download speed (bytes/s), and how fast ffmpeg converts
+      peers: item.peers,
+      rate: item.rate,
+      speed: item.ffSpeed,
     });
   }
 

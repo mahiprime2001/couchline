@@ -90,7 +90,11 @@ await host.waitForSelector('text=STREAMING', { timeout: 15000 });
 check('host started streaming', true);
 
 // ---- 3. viewer joins from another browser context
+// this test covers the room-server path: the viewer's direct (WebRTC) connection is switched off, as if the network blocked it
 const viewerCtx = await browser.newContext();
+await viewerCtx.addInitScript(() => {
+  delete window.RTCPeerConnection;
+});
 const viewer = await viewerCtx.newPage();
 viewer.on('pageerror', (e) => console.log('[viewer pageerror]', e.message));
 const streamLogs = [];

@@ -2,15 +2,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { LIMITS, formatTime } from '@wp/shared';
 import { onSignal, send, useRoom } from '../lib/room';
+import { iceServers, RtcHost } from '../lib/screenRtc';
 import { HostStreamer, pickCodecs, type ViewerStat } from '../lib/hostStreamer';
 import { loadHandle, pickVideoFile, reopenHandle, saveHandle } from '../lib/fileHandle';
 import { useHostedFallback } from '../lib/hostedFallback';
 
-const PRESETS: Array<[string, number]> = [
-  ['Low · 0.8 Mbps', 800_000],
-  ['Medium · 1.5 Mbps', 1_500_000],
-  ['High · 2.5 Mbps', 2_500_000],
-];
+/** The most the screen share sends. Each viewer's connection adapts below it to what the host's upload can carry. */
+const STREAM_BITRATE = 2_500_000;
 
 const NO_AUDIO =
   'No sound is being streamed: this file has no audio, or your browser cannot play its audio format (common with AC3, E-AC3 or DTS in movie .mkv/.mp4 files). Viewers get the video only. To keep the sound, convert just the audio: ffmpeg -i input.mkv -c:v copy -c:a aac output.mp4  (or play the file in another player and use "Share a screen / tab" with system audio).';
@@ -44,6 +42,9 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
 
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamerRef = useRef<HostStreamer | null>(null);
+  // the direct (WebRTC) connections to the viewers; the server path above is only for viewers who cannot connect
+  const rtcRef = useRef<RtcHost | null>(null);
+  const [directViewers, setDirectViewers] = useState(0);
   const mediaRef = useRef<MediaStream | null>(null);
   const urlRef = useRef('');
   // the file being played, so a sound problem found later can still offer converting it
@@ -56,7 +57,8 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [stats, setStats] = useState<ViewerStat[]>([]);
-  const [bitrate, setBitrate] = useState(1_500_000);
+  // the server path adjusts this itself when a viewer falls behind (see HostStreamer); there is no manual choice
+  const [bitrate, setBitrate] = useState(STREAM_BITRATE);
   const [source, setSource] = useState<'file' | 'screen'>('file');
 
   // getDisplayMedia is missing on phone browsers, and on plain-http pages (not a secure context)
@@ -71,6 +73,8 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
       onSignal((from, data) => {
         if (typeof data?.kind === 'string' && data.kind.startsWith('stream-')) {
           streamerRef.current?.handleSignal(from, data);
+        } else if (typeof data?.kind === 'string' && data.kind.startsWith('rtc-')) {
+          rtcRef.current?.handleSignal(from, data);
         }
       }),
     [],
@@ -79,12 +83,16 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
   // someone who leaves the room stops being sent the stream
   useEffect(() => {
     streamerRef.current?.keepOnly(members.map((m) => m.id));
+    rtcRef.current?.keepOnly(members.map((m) => m.id));
   }, [members]);
 
   const cleanup = () => {
     window.clearInterval(posTimer.current);
     streamerRef.current?.stop();
     streamerRef.current = null;
+    rtcRef.current?.stop();
+    rtcRef.current = null;
+    setDirectViewers(0);
     mediaRef.current?.getTracks().forEach((t) => t.stop());
     mediaRef.current = null;
     if (urlRef.current) URL.revokeObjectURL(urlRef.current);
@@ -139,6 +147,11 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
     });
     streamerRef.current = streamer;
     streamer.start();
+    // the picture goes straight to each viewer over WebRTC; the ICE servers arrive a moment later (see RtcHost)
+    const rtc = new RtcHost({ signal: (to, data) => send({ t: 'signal', to, data }), onCount: setDirectViewers, assign: true });
+    rtcRef.current = rtc;
+    rtc.setStream(ms, bitrate);
+    void iceServers().then((ice) => rtc.setIceServers(ice));
     send({ t: 'streamStart', ...info });
     setLive(true);
     setNotice(!hasAudio ? (info.source === 'file' ? NO_AUDIO : NO_AUDIO_SCREEN) : null);
@@ -277,10 +290,6 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
     </button>
   );
 
-  const changeQuality = (bps: number) => {
-    setBitrate(bps);
-    streamerRef.current?.setBitrate(bps);
-  };
 
   const nameOf = (id: string) => members.find((m) => m.id === id)?.nick ?? 'viewer';
 
@@ -294,19 +303,8 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
         <div className="host-live">
           <div className="host-bar">
             <span className="live-badge">● STREAMING</span>
-            <span className="muted">{stats.length} watching (max {LIMITS.maxViewersStream})</span>
+            <span className="muted">{stats.length + directViewers} watching (max {LIMITS.maxViewersStream})</span>
             <span className="spacer" />
-            <label className="muted">
-              Quality{' '}
-              <select value={bitrate} onChange={(e) => changeQuality(Number(e.target.value))}>
-                {PRESETS.map(([label, bps]) => (
-                  <option key={bps} value={bps}>
-                    {label}
-                  </option>
-                ))}
-                {!PRESETS.some(([, b]) => b === bitrate) && <option value={bitrate}>{(bitrate / 1e6).toFixed(1)} Mbps (auto)</option>}
-              </select>
-            </label>
             <button className="danger" onClick={stop}>
               Stop streaming
             </button>
@@ -360,16 +358,6 @@ export function StreamHost({ pickSignal = 0, screenSignal = 0 }: { pickSignal?: 
                 Share a screen / tab
               </button>
             )}
-            <label className="muted">
-              Quality{' '}
-              <select value={bitrate} onChange={(e) => setBitrate(Number(e.target.value))}>
-                {PRESETS.map(([label, bps]) => (
-                  <option key={bps} value={bps}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
           </div>
           {!canScreenShare && (
             <p className="muted small">Screen sharing is not available in this browser (phones and tablets do not support it, and it needs a secure https page).</p>

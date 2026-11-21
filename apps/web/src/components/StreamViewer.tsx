@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { clampSeek, type Cue } from '@wp/shared';
 import { onSeekRequest, onSignal, onStreamPiece, send, useRoom } from '../lib/room';
 import { StreamReceiver, type RecvStatus } from '../lib/streamReceiver';
+import { iceServers, RtcNode } from '../lib/screenRtc';
 import { Controls, SubtitleOverlay, TapControls, useWake } from './Controls';
 import { useMediaSession, usePlayerShortcuts } from '../lib/shortcuts';
 import { SettingsMenu } from './SettingsMenu';
@@ -18,10 +19,105 @@ interface Props {
 const LIVE_DELAY = 2;
 
 /**
- * Viewer for a host-streamed video. The viewer can rewind inside whatever they have
+ * The host's picture: straight from the host over WebRTC when the connection allows it (see screenRtc.ts), otherwise
+ * through the room server (ServerStreamViewer). Only one of the two plays at a time.
+ */
+export function StreamViewer(props: Props) {
+  const live = useRoom((s) => s.stream.live);
+  const epoch = useRoom((s) => s.stream.epoch);
+  const hostId = useRoom((s) => s.members.find((m) => m.role === 'host')?.id ?? null);
+  const [rtc, setRtc] = useState<{ phase: 'connecting' | 'playing' | 'fallback'; media: MediaStream | null }>({ phase: 'connecting', media: null });
+  const viewerRef = useRef<RtcNode | null>(null);
+
+  // once a direct connection has failed for this viewer, they keep the server path (switching back would restart their
+  // picture every time the host starts again, and a returning host has a new id)
+  const directFailed = useRef(false);
+
+  // connect whenever the host starts or restarts streaming
+  useEffect(() => {
+    if (directFailed.current) {
+      setRtc({ phase: 'fallback', media: null });
+      return;
+    }
+    setRtc({ phase: 'connecting', media: null });
+    if (!live || !hostId) return;
+    let cancelled = false;
+    console.info('[rtc]', 'viewer: the host is streaming, connecting directly');
+    void iceServers().then((ice) => {
+      if (cancelled) return;
+      const viewer: RtcNode = new RtcNode({
+        iceServers: ice,
+        signal: (to, data) => send({ t: 'signal', to, data }),
+        onStream: (media) => setRtc({ phase: 'playing', media }),
+        onFail: () => {
+          viewer.stop();
+          directFailed.current = true;
+          setRtc({ phase: 'fallback', media: null });
+        },
+      });
+      viewerRef.current = viewer;
+      viewer.connect(hostId);
+    });
+    return () => {
+      cancelled = true;
+      viewerRef.current?.stop();
+      viewerRef.current = null;
+    };
+  }, [live, epoch, hostId]);
+
+  useEffect(
+    () =>
+      onSignal((from, data) => {
+        if (typeof data?.kind === 'string' && data.kind.startsWith('rtc-')) viewerRef.current?.handleSignal(from, data);
+      }),
+    [],
+  );
+
+  // not streaming, or no direct connection: the server path (it shows the waiting state itself)
+  if (!live || rtc.phase === 'fallback') return <ServerStreamViewer {...props} />;
+  return <RtcVideo media={rtc.media} connecting={rtc.phase === 'connecting'} onFullscreen={props.onFullscreen} />;
+}
+
+/** Plays the picture from a direct (WebRTC) connection. It is live: there is nothing to rewind to. */
+function RtcVideo({ media, connecting, onFullscreen }: { media: MediaStream | null; connecting: boolean; onFullscreen(): void }) {
+  const videoRef = useRef<HTMLVideoElement>(null);
+  const [needTap, setNeedTap] = useState(false);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (v) v.volume = Number(localStorage.getItem('wp-volume') ?? 80) / 100;
+  }, []);
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v || !media) return;
+    v.srcObject = media;
+    void v.play().catch(() => setNeedTap(true));
+  }, [media]);
+  return (
+    <div className="stage-inner">
+      <div className="video-area" onDoubleClick={onFullscreen}>
+        <video ref={videoRef} playsInline controls />
+        {connecting && <div className="overlay-msg">Connecting to the host…</div>}
+        {needTap && (
+          <button
+            className="overlay-btn"
+            onClick={() => {
+              setNeedTap(false);
+              void videoRef.current?.play().catch(() => setNeedTap(true));
+            }}
+          >
+            ▶ Click to start playback
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * Viewer for a host-streamed video through the room server. The viewer can rewind inside whatever they have
  * buffered, but every seek is clamped to the live edge: they can never go forward of the host.
  */
-export function StreamViewer({ onFullscreen }: Props) {
+function ServerStreamViewer({ onFullscreen }: Props) {
   const stream = useRoom((s) => s.stream);
   const hostId = useRoom((s) => s.members.find((m) => m.role === 'host')?.id ?? null);
   // the stream arrives through the room server, so only playing WebM matters here

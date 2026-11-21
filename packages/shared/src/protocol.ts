@@ -9,8 +9,8 @@ export const LIMITS = {
   chatHistory: 50,
   chatLen: 300,
   queueMax: 200, // room for a whole YouTube playlist
-  graceLinkMs: 5 * 60_000,
-  graceStreamMs: 20 * 60_000,
+  graceLinkMs: 60_000, // an empty room is wiped after a minute without anyone rejoining
+  graceStreamMs: 60_000,
   mediaBacklog: 150_000, // bytes queued for one person (about 2 s of one camera) before their video is skipped; sound is never skipped
   streamBacklog: 4_000_000, // bytes queued for one stream viewer before they are skipped and the host starts afresh for them
   mediaFrame: 256_000, // bytes in one binary voice or camera frame (a key frame of a 640-wide picture is well under this)
@@ -61,7 +61,7 @@ export const ClientMsg = z.discriminatedUnion('t', [
   z.object({ t: z.literal('reaction'), emoji: z.enum(REACTIONS) }),
 
   // playback (host / mod)
-  z.object({ t: z.literal('load'), url: z.string().max(500), title: z.string().trim().max(200).optional() }),
+  z.object({ t: z.literal('load'), url: z.string().max(2000), title: z.string().trim().max(200).optional() }),
   z.object({
     t: z.literal('control'),
     action: z.enum(['play', 'pause', 'seek']),
@@ -70,11 +70,11 @@ export const ClientMsg = z.discriminatedUnion('t', [
   z.object({ t: z.literal('ended'), position: position.optional() }),
 
   // queue
-  z.object({ t: z.literal('queueAdd'), url: z.string().max(500), title: z.string().trim().max(200).optional() }),
+  z.object({ t: z.literal('queueAdd'), url: z.string().max(2000), title: z.string().trim().max(200).optional() }),
   // a whole playlist (or several picks) at once: one queue update for everyone instead of one per video
   z.object({
     t: z.literal('queueAddMany'),
-    items: z.array(z.object({ url: z.string().max(500), title: z.string().trim().max(200).optional() })).min(1).max(200),
+    items: z.array(z.object({ url: z.string().max(2000), title: z.string().trim().max(200).optional() })).min(1).max(200),
   }),
   z.object({ t: z.literal('queueRemove'), id: z.string().max(64) }),
   z.object({ t: z.literal('queueVote'), id: z.string().max(64) }),
@@ -89,6 +89,8 @@ export const ClientMsg = z.discriminatedUnion('t', [
   // moderation
   z.object({ t: z.literal('setRole'), id: z.string().max(64), role: z.enum(['mod', 'viewer']) }),
   z.object({ t: z.literal('kick'), id: z.string().max(64) }),
+  // the host ends the room: everyone is removed and the room's files and chat are deleted at once
+  z.object({ t: z.literal('closeRoom') }),
   z.object({ t: z.literal('mute'), id: z.string().max(64), muted: z.boolean() }),
   z.object({
     t: z.literal('roomSettings'),

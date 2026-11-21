@@ -684,6 +684,22 @@ export class RoomCore {
         return;
       }
 
+      case 'closeRoom': {
+        if (!isHost) return;
+        for (const t of [...this.conns.values()]) {
+          this.send(t, { t: 'kicked', reason: 'The host closed the room.' });
+          try {
+            t.ws.close(4003, 'closed');
+          } catch {
+            /* ignore */
+          }
+        }
+        this.reset();
+        // the host runtime then deletes the room's files and chat, as it does for an empty room
+        this.hooks.setAlarm(0);
+        return;
+      }
+
       case 'kick': {
         if (!organiser) return;
         const t = this.conns.get(msg.id);

@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
 import { create } from 'zustand';
-import type { SyncState } from '@wp/shared';
+import { isTorrentLink, type SyncState } from '@wp/shared';
 import { send, useRoom } from './room';
 
 /** YouTube search, playlists and suggestions, served by the Node backend through yt-dlp (no API key). */
@@ -56,7 +56,8 @@ export function playlistIdOf(raw: string): string | null {
   }
 }
 
-export const looksLikeUrl = (s: string) => /^https?:\/\//i.test(s.trim());
+/** A link to paste (http(s), or a magnet link): it goes in the queue as a link, never to a YouTube search. */
+export const looksLikeUrl = (s: string) => /^https?:\/\//i.test(s.trim()) || isTorrentLink(s);
 
 /** The YouTube video behind what the room plays: the embed itself, or a yt-dlp copy (tagged ?yt=<id>). */
 export function youtubeIdOf(sync: SyncState): string | null {

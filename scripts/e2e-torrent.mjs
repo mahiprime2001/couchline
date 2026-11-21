@@ -27,7 +27,7 @@ const { Server: Tracker } = await import(new URL('../apps/server/node_modules/bi
 const ffmpeg = require('ffmpeg-static');
 
 const work = mkdtempSync(join(tmpdir(), 'couchline-torrent-'));
-const video = join(work, 'film.mp4');
+const video = join(work, 'film.mkv');
 const made = spawnSync(
   ffmpeg,
   ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'testsrc=duration=4:size=320x240:rate=15', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=4', '-c:v', 'libx264', '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-shortest', video],
@@ -44,7 +44,7 @@ await new Promise((r) => tracker.listen(TRACKER_PORT, '127.0.0.1', r));
 const seeder = new WebTorrent({ dht: false, lsd: false });
 const magnet = await new Promise((resolve, reject) => {
   seeder.on('error', reject);
-  seeder.seed(readFileSync(video), { name: 'film.mp4', announce: [`http://127.0.0.1:${TRACKER_PORT}/announce`] }, (t) => resolve(t.magnetURI));
+  seeder.seed(readFileSync(video), { name: 'film.mkv', announce: [`http://127.0.0.1:${TRACKER_PORT}/announce`] }, (t) => resolve(t.magnetURI));
 });
 
 const server = spawn(process.execPath, ['--import', 'tsx', 'src/index.ts'], {
@@ -93,13 +93,16 @@ try {
 
   const deadline = Date.now() + 180_000;
   let st = null;
+  let sawPeers = false; // the status showed connected peers while the download ran
   while (id && Date.now() < deadline) {
     st = await (await fetch(`${BASE}/api/media/${id}`)).json();
+    if (typeof st.peers === 'number' && typeof st.rate === 'number') sawPeers = true;
     if (st.state === 'done' || st.state === 'error') break;
     await sleep(1000);
   }
   check('the torrent downloads and converts for playing', st?.state === 'done', JSON.stringify(st));
-  check('the room shows the torrent name, not the magnet text', st?.name === 'film.mp4', JSON.stringify(st?.name));
+  check('the status includes the peer count and download speed', sawPeers);
+  check('the room shows the torrent name, not the magnet text', st?.name === 'film.mkv', JSON.stringify(st?.name));
 
   if (st?.state === 'done') {
     const list = await fetch(`${BASE}/media/${id}/${st.entry}`);

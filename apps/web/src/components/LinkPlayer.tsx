@@ -7,6 +7,7 @@ import { Controls, SubtitleOverlay, TapControls, useWake } from './Controls';
 import { SettingsMenu } from './SettingsMenu';
 import { useMediaSession, usePlayerShortcuts } from '../lib/shortcuts';
 import { youtubeIdOf } from '../lib/ytlists';
+import { useLinkStatus } from '../lib/linkStatus';
 
 interface Props {
   onFullscreen(): void;
@@ -92,6 +93,7 @@ function LinkInner({ onFullscreen }: Props) {
     localStorage.setItem('wp-watch', m);
   };
   const upNextTitle = useRoom((s) => s.queue.find((x) => x.approved)?.title ?? null);
+  const linkStatus = useLinkStatus((s) => s.text);
   const suppressUntil = useRef(0);
   const wantSince = useRef(0);
   const endedSent = useRef(false);
@@ -489,7 +491,9 @@ function LinkInner({ onFullscreen }: Props) {
         )}
         <SubtitleOverlay cues={cues} time={cur} />
         {loadError && <div className="overlay-msg">{loadError}</div>}
-        {!loadError && sync.kind === 'site' && <div className="overlay-msg">⬇️ Getting this video ready…</div>}
+        {!loadError && sync.kind === 'site' && (
+          <div className="overlay-msg">{linkStatus ?? '⬇️ Getting this video ready… (the host’s computer is fetching it)'}</div>
+        )}
         {!loadError && needTap && (
           <button className="overlay-btn" onClick={tap}>
             ▶ Click to join playback

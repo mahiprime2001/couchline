@@ -47,19 +47,28 @@ export function isTorrentLink(raw: string): boolean {
   return /^https:\/\/\S+\.torrent(\?\S*)?$/i.test(s);
 }
 
+/** Why a link was refused, printed so it shows in the browser console and in the server's terminal. */
+function refuse(raw: string, error: string): ParsedLink {
+  console.warn(`[link] rejected "${raw.trim().slice(0, 120)}": ${error}`);
+  return { ok: false, error };
+}
+
 /** Allowlist: YouTube links, direct video files and torrents. Anything else is rejected. */
 export function parseLink(raw: string): ParsedLink {
   // a torrent is fetched by the host's page, like any other site link (see HostedUpload and media.ts)
   if (isTorrentLink(raw)) return { ok: true, kind: 'site', url: raw.trim(), videoId: null };
+  if (/^magnet:/i.test(raw.trim())) {
+    return refuse(raw, 'This magnet link has no standard info hash (xt=urn:btih:...). Only those work here.');
+  }
   let u: URL;
   try {
     u = new URL(raw.trim());
   } catch {
-    return { ok: false, error: 'That is not a valid link.' };
+    return refuse(raw, 'That is not a valid link: it could not be read as a web address. Check for missing http(s):// or stray text.');
   }
   const local = isPrivateHost(u.hostname);
   if (u.protocol !== 'https:' && !(local && u.protocol === 'http:')) {
-    return { ok: false, error: 'Only https links are allowed.' };
+    return refuse(raw, `Only https links are allowed (this one uses ${u.protocol}). A .torrent link must start with https://.`);
   }
   if (YT_HOSTS.has(u.hostname)) {
     let id: string | null = null;
@@ -72,7 +81,7 @@ export function parseLink(raw: string): ParsedLink {
     if (id && YT_ID.test(id)) {
       return { ok: true, kind: 'youtube', url: `https://www.youtube.com/watch?v=${id}`, videoId: id };
     }
-    return { ok: false, error: 'Could not find a YouTube video id in that link.' };
+    return refuse(raw, 'Could not find a YouTube video id in that link.');
   }
   if (/\.m3u8$/i.test(u.pathname)) {
     return { ok: true, kind: 'hls', url: u.toString(), videoId: null };
@@ -83,7 +92,7 @@ export function parseLink(raw: string): ParsedLink {
   // Any other https page may be a site yt-dlp knows (Vimeo, Twitch, SoundCloud, …). It cannot play directly:
   // the host's page fetches it with yt-dlp, and yt-dlp itself says whether the link is usable.
   if (u.protocol === 'https:') return { ok: true, kind: 'site', url: u.toString(), videoId: null };
-  return { ok: false, error: 'Supported: YouTube links, direct .mp4 / .webm / .mov files, .m3u8 streams, and other https video pages.' };
+  return refuse(raw, 'Supported: YouTube links, direct .mp4 / .webm / .mov files, .m3u8 streams, and other https video pages.');
 }
 
 const BAD_WORDS = ['fuck', 'shit', 'bitch', 'asshole', 'cunt', 'nigger', 'faggot'];

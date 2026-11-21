@@ -301,6 +301,17 @@ export function RoomPage({ code, navigate }: { code: string; navigate: (p: strin
         <span className="muted">{members.length} here</span>
         {hostAway && <span className="pill warn">Host away</span>}
         <span className="spacer" />
+        {isHost && (
+          <button
+            className="danger"
+            title="End the room for everyone: they are removed, and its videos and chat are deleted now"
+            onClick={() =>
+              window.confirm('Close this room for everyone? Everyone is removed, and its videos and chat are deleted.') && send({ t: 'closeRoom' })
+            }
+          >
+            Close room
+          </button>
+        )}
         <button onClick={leave}>Leave</button>
       </header>
 

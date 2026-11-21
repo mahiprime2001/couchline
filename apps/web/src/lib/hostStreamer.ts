@@ -76,7 +76,8 @@ export class HostStreamer {
   }
 
   start(): void {
-    this.startRecorder();
+    // the recorder starts only when a viewer needs this server path (see addViewer): screen share goes over WebRTC
+    // by default, and recording twice would load the host's computer for nothing
     this.statsTimer = window.setInterval(() => this.emitStats(), 2000);
   }
 
@@ -266,6 +267,7 @@ export class HostStreamer {
 
   private addViewer(id: string): void {
     this.viewers.set(id, { id, ready: false, fresh: true, lag: 0 });
+    if (!this.rec) this.startRecorder();
     this.o.signal(id, { kind: 'stream-hello', codecs: this.o.codecs });
     // a fresh recording that has not sent its first chunk yet is their start point; otherwise start one
     if (this.firstChunk) this.restartPending = true;
